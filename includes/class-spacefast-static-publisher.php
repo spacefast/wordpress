@@ -119,7 +119,7 @@ final class Spacefast_Static_Publisher {
 	}
 
 	/**
-	 * @return array<int,array{path:string,size:int,sha256:string}>
+	 * @return array<int,array{path:string,size:int,sha256:string,contentType:string}>
 	 */
 	public static function manifest( string $archive_dir ): array {
 		$root = self::archive_root( $archive_dir );
@@ -145,6 +145,7 @@ final class Spacefast_Static_Publisher {
 				'path' => $relative,
 				'size' => $size,
 				'sha256' => $digest,
+				'contentType' => Spacefast_Client::content_type_for_file( $absolute ),
 			);
 		}
 		if ( array() === $files ) {
