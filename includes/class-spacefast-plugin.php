@@ -235,7 +235,7 @@ final class Spacefast_Plugin {
 				'idempotency_key' => $idempotency_key,
 			);
 		}
-		if ( ! preg_match( '/^team_[A-Za-z0-9_-]+$/', $team_id ) || '' === $title ) {
+		if ( ! self::valid_space_creation_identity( $team_id, $title ) ) {
 			self::notice( 'error', __( 'Spacefast could not determine the Team or Space name.', 'spacefast-wordpress' ) );
 			self::redirect();
 		}
@@ -258,6 +258,12 @@ final class Spacefast_Plugin {
 			$result['ok'] ? self::setup_started_message() : $result['message']
 		);
 		self::redirect();
+	}
+
+	private static function valid_space_creation_identity( string $team_id, string $title ): bool {
+		// Team IDs are opaque API identifiers. Do not impose a client-side prefix
+		// that can drift from the control plane's current identifier format.
+		return '' !== trim( $team_id ) && '' !== trim( $title );
 	}
 
 	/**

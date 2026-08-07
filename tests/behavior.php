@@ -328,6 +328,15 @@ check(
 	array( 'teamId' => 'team_demo', 'title' => 'Spacefast Launchpad' ) === json_decode( $create_requests[0][1]['body'], true ),
 	'creates the Space in the authorized Team with the WordPress site name'
 );
+$valid_space_creation_identity = new ReflectionMethod( Spacefast_Plugin::class, 'valid_space_creation_identity' );
+check(
+	true === $valid_space_creation_identity->invoke( null, 'A7bc9DeF2gHi3JkLmN4pQrStUvWxYz01', 'Spacefast Launchpad' ),
+	'accepts the opaque Team identifiers returned by Spacefast when creating a Space'
+);
+check(
+	false === $valid_space_creation_identity->invoke( null, '', 'Spacefast Launchpad' ),
+	'rejects Space creation when the authorized Team is missing'
+);
 $choices_before_creation = get_option( Spacefast_OAuth::CHOICES_OPTION );
 Spacefast_OAuth::remember_space_choice( $created_space['data']['space'] );
 Spacefast_OAuth::remember_space_choice( $created_space['data']['space'] );
