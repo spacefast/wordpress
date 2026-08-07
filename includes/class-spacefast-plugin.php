@@ -844,6 +844,7 @@ final class Spacefast_Plugin {
 		require_once dirname( __DIR__ ) . '/includes/class-spacefast-simply-static-task.php';
 		add_filter( 'simplystatic.archive_creation_job.task_list', array( __CLASS__, 'simply_static_tasks' ), 20, 2 );
 		add_filter( 'simply_static_class_name', array( __CLASS__, 'simply_static_task_class' ), 20, 2 );
+		add_filter( 'ss_additional_urls', array( __CLASS__, 'simply_static_archive_urls' ), 20 );
 		add_action( 'ss_archive_creation_job_after_start_queue', array( __CLASS__, 'static_export_started' ), 20 );
 	}
 
@@ -889,6 +890,41 @@ final class Spacefast_Plugin {
 		return 'spacefast_publish' === $task_name
 			? Spacefast_Simply_Static_Publish_Task::class
 			: $class_name;
+	}
+
+	/**
+	 * Simply Static discovers custom post entries but not every custom post type
+	 * archive. Include those archive routes so navigation links cannot publish as
+	 * broken pages.
+	 *
+	 * @param array<int,string> $urls Additional source URLs.
+	 * @return array<int,string>
+	 */
+	public static function simply_static_archive_urls( array $urls ): array {
+		if ( Spacefast_Settings::MODE_STATIC !== Spacefast_Settings::mode() ) {
+			return $urls;
+		}
+		$options = get_option( 'simply-static', array() );
+		$options = is_array( $options ) ? $options : array();
+		$selected = isset( $options['post_types'] ) && is_array( $options['post_types'] )
+			? $options['post_types']
+			: array();
+		$configured = ! empty( $options['post_types_configured'] ) || array() !== $selected;
+		$post_types = get_post_types( array( 'public' => true ), 'objects' );
+		foreach ( $post_types as $name => $post_type ) {
+			if (
+				'attachment' === $name
+				|| empty( $post_type->has_archive )
+				|| ( $configured && ! in_array( $name, $selected, true ) )
+			) {
+				continue;
+			}
+			$archive_url = get_post_type_archive_link( $name );
+			if ( is_string( $archive_url ) && '' !== $archive_url ) {
+				$urls[] = $archive_url;
+			}
+		}
+		return array_values( array_unique( $urls ) );
 	}
 
 	public static function static_export_started( int $blog_id = 0 ): void {
