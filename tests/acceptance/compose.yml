@@ -13,7 +13,7 @@ services:
       retries: 30
 
   wordpress:
-    image: wordpress:6.5-php8.1-apache
+    image: wordpress:6.5-php8.1-apache@sha256:deb7e5d058e277be30e7f7b93e8cf863b54130fcb2adf481a46280d76499d144
     depends_on:
       db:
         condition: service_healthy
@@ -22,6 +22,7 @@ services:
       WORDPRESS_DB_USER: wordpress
       WORDPRESS_DB_PASSWORD: wordpress
       WORDPRESS_DB_NAME: wordpress
+      WORDPRESS_CONFIG_EXTRA: "define( 'WP_AUTO_UPDATE_CORE', false );"
     volumes:
       - wordpress_data:/var/www/html
       - ../..:/var/www/html/wp-content/plugins/spacefast-wordpress:ro
@@ -32,7 +33,7 @@ services:
       retries: 30
 
   wpcli:
-    image: wordpress:cli-php8.1
+    image: wordpress:cli-php8.1@sha256:ab5fb76caa861f32c21e1d95a057f52007f4af7130fb16a0f68874dabe0549a4
     depends_on:
       wordpress:
         condition: service_healthy

@@ -10,6 +10,8 @@ function spacefast_accept( bool $condition, string $message ): void {
 	}
 }
 
+global $wp_version;
+spacefast_accept( str_starts_with( $wp_version, '6.5.' ), 'Acceptance is not running WordPress 6.5.' );
 spacefast_accept( is_plugin_active( 'spacefast-wordpress/spacefast-wordpress.php' ), 'Plugin is not active.' );
 spacefast_accept(
 	10 === has_action( 'admin_post_spacefast_wordpress_oauth_start', array( 'Spacefast_Plugin', 'oauth_start' ) ),
@@ -18,6 +20,10 @@ spacefast_accept(
 spacefast_accept(
 	10 === has_action( 'admin_post_spacefast_wordpress_select_space', array( 'Spacefast_Plugin', 'select_space' ) ),
 	'Space selection handler is not registered.'
+);
+spacefast_accept(
+	10 === has_action( 'admin_post_spacefast_wordpress_change_space', array( 'Spacefast_Plugin', 'change_space' ) ),
+	'Space change handler is not registered.'
 );
 spacefast_accept(
 	array( 'teams:read', 'spaces:read', 'spaces:publish', 'offline_access' ) === Spacefast_OAuth::scopes( Spacefast_Settings::MODE_STATIC ),

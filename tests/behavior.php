@@ -155,6 +155,21 @@ function response( int $status, array $data = array() ): array {
 	);
 }
 
+function paginated_response( array $data, ?string $next_cursor = null ): array {
+	return array(
+		'response' => array( 'code' => 200 ),
+		'body' => json_encode(
+			array(
+				'data' => $data,
+				'pagination' => array(
+					'nextCursor' => $next_cursor,
+					'hasMore' => null !== $next_cursor,
+				),
+			)
+		),
+	);
+}
+
 function raw_response( int $status, array $data = array() ): array {
 	return array(
 		'response' => array( 'code' => $status ),
@@ -193,10 +208,23 @@ $oauth_transport = static function ( string $url, array $args ) use ( &$oauth_re
 		);
 	}
 	if ( str_contains( $url, '/v1/teams' ) ) {
-		return response( 200, array( array( 'id' => 'team_demo', 'name' => 'Demo Team', 'slug' => 'demo-team' ) ) );
+		return paginated_response( array( array( 'id' => 'team_demo', 'name' => 'Demo Team', 'slug' => 'demo-team' ) ) );
 	}
-	return response(
-		200,
+	if ( str_contains( $url, 'cursor=space%20cursor%2F2' ) ) {
+		return paginated_response(
+			array(
+				array(
+					'id' => 'spc_second',
+					'teamId' => 'team_demo',
+					'teamSlug' => 'demo-team',
+					'slug' => 'second-space',
+					'title' => 'Second Space',
+					'liveUrl' => 'https://second.spacefast.site',
+				),
+			)
+		);
+	}
+	return paginated_response(
 		array(
 			array(
 				'id' => 'spc_demo',
@@ -206,7 +234,8 @@ $oauth_transport = static function ( string $url, array $args ) use ( &$oauth_re
 				'title' => 'Demo Space',
 				'liveUrl' => 'https://demo.spacefast.site',
 			),
-		)
+		),
+		'space cursor/2'
 	);
 };
 $oauth = new Spacefast_OAuth( $oauth_transport );
@@ -214,6 +243,7 @@ $authorization = $oauth->begin( Spacefast_Settings::MODE_HEADLESS );
 check( true === $authorization['ok'], 'dynamic client registration starts OAuth' );
 $registration_body = json_decode( $oauth_requests[0][1]['body'], true );
 check( 'none' === $registration_body['token_endpoint_auth_method'], 'registers a public PKCE client' );
+check( 'Spacefast for WordPress (wp.example.test)' === $registration_body['client_name'], 'identifies this WordPress installation in Connected Apps' );
 check(
 	array( Spacefast_Settings::api_url() . '/v1' ) === $registration_body['resources'],
 	'binds tokens to the Spacefast API resource'
@@ -223,8 +253,21 @@ $pending = get_option( Spacefast_OAuth::PENDING_OPTION );
 $finished = $oauth->finish( 'authorization-code', (string) $pending['state'] );
 check( true === $finished['ok'], 'valid callback exchanges its code and loads Team-scoped choices' );
 check( 'oauth_refresh' === Spacefast_Settings::get()['refresh_token'], 'stores the rotating refresh token' );
-check( 1 === count( get_option( Spacefast_OAuth::CHOICES_OPTION )['spaces'] ), 'returns Space choices to WordPress' );
+check( 2 === count( get_option( Spacefast_OAuth::CHOICES_OPTION )['spaces'] ), 'loads every paginated Space choice into WordPress' );
+check(
+	str_contains( implode( ' ', array_column( $oauth_requests, 0 ) ), 'cursor=space%20cursor%2F2' ),
+	'encodes and follows the opaque Space cursor'
+);
 check( ! Spacefast_Settings::configured(), 'authorization alone is not presented as Connected' );
+
+$reauthorization = $oauth->begin( Spacefast_Settings::MODE_HEADLESS );
+$reauthorization_pending = get_option( Spacefast_OAuth::PENDING_OPTION );
+$reauthorized = $oauth->finish( 'replacement-code', (string) $reauthorization_pending['state'] );
+check( true === $reauthorized['ok'], 'reauthorization replaces a connection only after the callback succeeds' );
+check(
+	2 === count( array_filter( $oauth_requests, static fn( array $request ): bool => str_ends_with( $request[0], '/oauth2/revoke' ) ) ),
+	'reauthorization revokes the replaced refresh and access tokens'
+);
 
 Spacefast_Settings::merge( array( 'expires_at' => 1 ) );
 $refresh_requests = array();

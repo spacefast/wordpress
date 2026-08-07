@@ -35,6 +35,14 @@ final class Spacefast_OAuth {
 		return rtrim( strtr( base64_encode( hash( 'sha256', $verifier, true ) ), '+/', '-_' ), '=' );
 	}
 
+	public static function client_name(): string {
+		$parts = wp_parse_url( home_url() );
+		$host = is_array( $parts ) ? (string) ( $parts['host'] ?? '' ) : '';
+		return '' === $host
+			? 'Spacefast for WordPress'
+			: 'Spacefast for WordPress (' . substr( $host, 0, 120 ) . ')';
+	}
+
 	/** @return array{ok:bool,message:string,url?:string} */
 	public function begin( string $mode ): array {
 		if ( ! in_array( $mode, Spacefast_Settings::modes(), true ) ) {
@@ -48,7 +56,7 @@ final class Spacefast_OAuth {
 			'POST',
 			$api_url . '/v1/auth/oauth2/register',
 			array(
-				'client_name' => 'Spacefast for WordPress',
+				'client_name' => self::client_name(),
 				'client_uri' => 'https://github.com/spacefast/wordpress',
 				'redirect_uris' => array( $callback ),
 				'grant_types' => array( 'authorization_code', 'refresh_token' ),
@@ -99,6 +107,7 @@ final class Spacefast_OAuth {
 		if ( ! hash_equals( (string) ( $pending['state'] ?? '' ), $state ) || '' === $code ) {
 			return array( 'ok' => false, 'message' => 'Authorization could not be verified. Start again.' );
 		}
+		$previous = Spacefast_Settings::get();
 		$tokens = $this->form_request(
 			Spacefast_Settings::api_url() . '/v1/auth/oauth2/token',
 			array(
@@ -115,6 +124,7 @@ final class Spacefast_OAuth {
 		if ( empty( $data['access_token'] ) || empty( $data['refresh_token'] ) ) {
 			return array( 'ok' => false, 'message' => 'Spacefast returned an incomplete authorization.' );
 		}
+		$this->revoke( $previous );
 		Spacefast_Settings::merge(
 			array(
 				'mode' => (string) $pending['mode'],
@@ -182,8 +192,9 @@ final class Spacefast_OAuth {
 		return (string) $settings['access_token'];
 	}
 
-	public function revoke(): void {
-		$settings = Spacefast_Settings::get();
+	/** @param array<string,mixed>|null $settings Settings whose tokens should be revoked. */
+	public function revoke( ?array $settings = null ): void {
+		$settings = $settings ?? Spacefast_Settings::get();
 		foreach ( array( $settings['refresh_token'], $settings['access_token'] ) as $token ) {
 			if ( ! is_string( $token ) || '' === $token ) continue;
 			$this->form_request(
