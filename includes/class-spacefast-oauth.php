@@ -94,7 +94,11 @@ final class Spacefast_OAuth {
 			'code_challenge_method' => 'S256',
 			'resource' => $resource,
 		);
-		return array( 'ok' => true, 'message' => '', 'url' => add_query_arg( $query, $api_url . '/v1/auth/oauth2/authorize' ) );
+		// add_query_arg() deliberately leaves values unencoded. The callback URL
+		// has its own query string, so using it here would turn the callback's
+		// second parameter into a top-level authorization parameter.
+		$url = $api_url . '/v1/auth/oauth2/authorize?' . http_build_query( $query, '', '&', PHP_QUERY_RFC3986 );
+		return array( 'ok' => true, 'message' => '', 'url' => $url );
 	}
 
 	/** @return array{ok:bool,message:string} */

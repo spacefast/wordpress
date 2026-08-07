@@ -85,7 +85,13 @@ function admin_url( string $path = '' ): string {
 	return 'https://wp.example.test/wp-admin/' . ltrim( $path, '/' );
 }
 function add_query_arg( array $args, string $url ): string {
-	return $url . ( str_contains( $url, '?' ) ? '&' : '?' ) . http_build_query( $args, '', '&', PHP_QUERY_RFC3986 );
+	// WordPress build_query() leaves values unencoded. This matters when a
+	// query argument is itself a URL with its own query string.
+	$pairs = array();
+	foreach ( $args as $key => $value ) {
+		$pairs[] = $key . '=' . $value;
+	}
+	return $url . ( str_contains( $url, '?' ) ? '&' : '?' ) . implode( '&', $pairs );
 }
 function home_url(): string {
 	return 'https://wp.example.test';
@@ -249,6 +255,12 @@ check(
 	'binds tokens to the Spacefast API resource'
 );
 check( str_contains( (string) $authorization['url'], 'code_challenge_method=S256' ), 'authorization uses PKCE S256' );
+$authorization_query = array();
+parse_str( (string) parse_url( (string) $authorization['url'], PHP_URL_QUERY ), $authorization_query );
+check(
+	Spacefast_OAuth::callback_url() === ( $authorization_query['redirect_uri'] ?? '' ),
+	'authorization preserves the complete query-bearing WordPress callback URI'
+);
 $pending = get_option( Spacefast_OAuth::PENDING_OPTION );
 $finished = $oauth->finish( 'authorization-code', (string) $pending['state'] );
 check( true === $finished['ok'], 'valid callback exchanges its code and loads Team-scoped choices' );

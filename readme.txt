@@ -3,7 +3,7 @@ Contributors: spacefast
 Tags: static site, headless cms, simply static, deployment
 Requires at least: 6.5
 Requires PHP: 8.1
-Stable tag: 0.3.1
+Stable tag: 0.3.2
 License: GPLv2 or later
 
 Publish a Simply Static export to Spacefast, or rebuild a headless site when WordPress content changes.
@@ -30,6 +30,9 @@ Both modes include a manual action in Settings > Spacefast. Headless repository 
 OAuth access is limited to the Team you authorize and the mode you choose. WordPress then verifies the selected Space before showing Connected. Tokens are stored in non-autoloaded options and are never displayed.
 
 == Changelog ==
+
+= 0.3.2 =
+* Preserve the complete WordPress admin callback URL during Spacefast authorization.
 
 = 0.3.1 =
 * Debounce automatic headless builds until public content has been quiet for 60 seconds.
