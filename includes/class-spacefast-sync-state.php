@@ -150,6 +150,11 @@ final class Spacefast_Sync_State {
 		for ( $attempt = 0; $attempt < 10; $attempt++ ) {
 			$current = self::get();
 			$next = $transition( $current );
+			// MySQL reports zero affected rows when the serialized value is
+			// unchanged. That is a successful no-op, not a CAS conflict.
+			if ( $next === $current ) {
+				return $current;
+			}
 			if ( self::compare_and_swap_option( self::OPTION, $current, $next ) ) {
 				return $next;
 			}
