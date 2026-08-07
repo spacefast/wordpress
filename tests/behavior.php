@@ -191,6 +191,10 @@ check(
 	array( 'teams:read', 'spaces:read', 'builds:trigger', 'offline_access' ) === Spacefast_OAuth::scopes( Spacefast_Settings::MODE_HEADLESS ),
 	'headless OAuth asks only for Team discovery, Space discovery, builds, and refresh access'
 );
+Spacefast_Settings::merge( array( 'scope' => 'teams:read spaces:read spaces:publish offline_access' ) );
+check( ! Spacefast_OAuth::has_scope( 'spaces:write' ), 'upgraded static authorization does not imply Space management access' );
+Spacefast_Settings::merge( array( 'scope' => 'teams:read spaces:read spaces:write spaces:publish offline_access' ) );
+check( Spacefast_OAuth::has_scope( 'spaces:write' ), 'recognizes granted Space management access' );
 check(
 	strlen( Spacefast_OAuth::pkce_challenge( str_repeat( 'v', 64 ) ) ) === 43,
 	'PKCE challenge uses an unpadded SHA-256 base64url value'
@@ -290,13 +294,20 @@ $creating_client = new Spacefast_Client(
 		);
 	}
 );
-$created_space = $creating_client->create_space( 'team_demo', 'Spacefast Launchpad' );
+$created_space = $creating_client->create_space( 'team_demo', 'Spacefast Launchpad', 'wordpress-space-operation' );
 check( true === $created_space['ok'], 'creates a Space with the authorized OAuth token' );
 check( '/v1/spaces' === parse_url( $create_requests[0][0], PHP_URL_PATH ), 'uses the canonical Space creation endpoint' );
+check( 'wordpress-space-operation' === $create_requests[0][1]['headers']['Idempotency-Key'], 'makes Space creation safe to retry' );
 check(
 	array( 'teamId' => 'team_demo', 'title' => 'Spacefast Launchpad' ) === json_decode( $create_requests[0][1]['body'], true ),
 	'creates the Space in the authorized Team with the WordPress site name'
 );
+$choices_before_creation = get_option( Spacefast_OAuth::CHOICES_OPTION );
+Spacefast_OAuth::remember_space_choice( $created_space['data']['space'] );
+Spacefast_OAuth::remember_space_choice( $created_space['data']['space'] );
+$remembered_choices = get_option( Spacefast_OAuth::CHOICES_OPTION );
+check( count( $choices_before_creation['spaces'] ) + 1 === count( $remembered_choices['spaces'] ), 'keeps a created Space selectable without adding duplicates' );
+check( 'spc_created' === end( $remembered_choices['spaces'] )['id'], 'persists the created Space receipt before connection verification' );
 
 $reauthorization = $oauth->begin( Spacefast_Settings::MODE_HEADLESS );
 $reauthorization_pending = get_option( Spacefast_OAuth::PENDING_OPTION );

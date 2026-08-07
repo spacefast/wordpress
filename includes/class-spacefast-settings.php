@@ -92,6 +92,7 @@ final class Spacefast_Settings {
 		delete_option( self::OPTION );
 		delete_option( Spacefast_OAuth::PENDING_OPTION );
 		delete_option( Spacefast_OAuth::CHOICES_OPTION );
+		delete_option( Spacefast_OAuth::CREATION_OPTION );
 		delete_option( 'spacefast_wordpress_snapshot_required' );
 		Spacefast_Sync_State::reset();
 		Spacefast_Static_Publisher::reset();

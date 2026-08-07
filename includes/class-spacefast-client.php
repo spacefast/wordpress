@@ -107,14 +107,15 @@ final class Spacefast_Client {
 	}
 
 	/** @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>} */
-	public function create_space( string $team_id, string $title ): array {
+	public function create_space( string $team_id, string $title, string $idempotency_key ): array {
 		return $this->request(
 			'POST',
 			'/v1/spaces',
 			array(
 				'teamId' => $team_id,
 				'title' => $title,
-			)
+			),
+			array( 'Idempotency-Key' => $idempotency_key )
 		);
 	}
 
