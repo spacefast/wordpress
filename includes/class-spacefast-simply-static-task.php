@@ -18,6 +18,11 @@ final class Spacefast_Simply_Static_Publish_Task extends \Simply_Static\Task {
 				|| ! empty( get_option( 'simply-static-use-single' ) )
 				|| ! empty( get_option( 'simply-static-use-build' ) )
 				|| ! empty( get_option( 'simply-static-404-only' ) );
+			if ( $partial_export && get_option( 'spacefast_wordpress_snapshot_required', false ) ) {
+				throw new RuntimeException(
+					__( 'Content was deleted. Run a full Export and publish so the old files are removed from Spacefast.', 'spacefast-wordpress' )
+				);
+			}
 			$result = Spacefast_Static_Publisher::step(
 				$options->get_archive_dir(),
 				null,
@@ -38,6 +43,9 @@ final class Spacefast_Simply_Static_Publish_Task extends \Simply_Static\Task {
 			}
 
 			Spacefast_Plugin::static_publish_completed( $result['version_id'], $result['status'] );
+			if ( ! $partial_export ) {
+				delete_option( 'spacefast_wordpress_snapshot_required' );
+			}
 			$this->save_status_message(
 				'unchanged' === $result['status']
 					? __( 'Spacefast is already up to date', 'spacefast-wordpress' )

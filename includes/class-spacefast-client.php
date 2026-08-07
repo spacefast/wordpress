@@ -18,6 +18,16 @@ final class Spacefast_Client {
 	 */
 	private function request( string $method, string $path, ?array $body = null, array $headers = array() ): array {
 		$settings = Spacefast_Settings::get();
+		$access_token = ( new Spacefast_OAuth( $this->transport ) )->access_token();
+		if ( '' === $access_token ) {
+			return array(
+				'ok' => false,
+				'retryable' => false,
+				'code' => 'reauthorization_required',
+				'message' => 'Reconnect Spacefast to continue.',
+				'data' => array(),
+			);
+		}
 		$args = array(
 			'method' => $method,
 			'timeout' => 10,
@@ -27,7 +37,7 @@ final class Spacefast_Client {
 			'limit_response_size' => 65536,
 			'headers' => array_merge(
 				array(
-					'Authorization' => 'Bearer ' . $settings['token'],
+					'Authorization' => 'Bearer ' . $access_token,
 					'Accept' => 'application/json',
 					'User-Agent' => 'Spacefast-WordPress/' . SPACEFAST_WORDPRESS_VERSION,
 				),
@@ -63,6 +73,9 @@ final class Spacefast_Client {
 				'code' => 'ok',
 				'message' => '',
 				'data' => $data,
+				'pagination' => isset( $decoded['pagination'] ) && is_array( $decoded['pagination'] )
+					? $decoded['pagination']
+					: array(),
 			);
 		}
 
@@ -79,6 +92,47 @@ final class Spacefast_Client {
 			'message' => in_array( $status, array( 401, 403 ), true )
 				? 'The Spacefast connection is no longer authorized.'
 				: (string) ( $decoded['detail'] ?? 'Spacefast rejected the request.' ),
+			'data' => array(),
+		);
+	}
+
+	/** @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>} */
+	public function list_teams(): array {
+		return $this->list_all( '/v1/teams' );
+	}
+
+	/** @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>} */
+	public function list_spaces(): array {
+		return $this->list_all( '/v1/spaces' );
+	}
+
+	/** @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>} */
+	private function list_all( string $path ): array {
+		$items = array();
+		$cursor = '';
+		for ( $page = 0; $page < 100; $page++ ) {
+			$query = $path . '?limit=100';
+			if ( '' !== $cursor ) {
+				$query .= '&cursor=' . rawurlencode( $cursor );
+			}
+			$result = $this->request( 'GET', $query );
+			if ( ! $result['ok'] ) {
+				return $result;
+			}
+			$items = array_merge( $items, array_values( $result['data'] ) );
+			$pagination = is_array( $result['pagination'] ?? null ) ? $result['pagination'] : array();
+			$next_cursor = (string) ( $pagination['nextCursor'] ?? '' );
+			if ( true !== ( $pagination['hasMore'] ?? false ) || '' === $next_cursor ) {
+				$result['data'] = $items;
+				return $result;
+			}
+			$cursor = $next_cursor;
+		}
+		return array(
+			'ok' => false,
+			'retryable' => false,
+			'code' => 'pagination_limit',
+			'message' => 'Spacefast returned too many pages while loading choices.',
 			'data' => array(),
 		);
 	}

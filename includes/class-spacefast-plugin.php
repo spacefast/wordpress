@@ -11,9 +11,11 @@ final class Spacefast_Plugin {
 
 	public static function boot(): void {
 		add_action( 'admin_menu', array( __CLASS__, 'admin_menu' ) );
-		add_action( 'admin_post_spacefast_wordpress_connect', array( __CLASS__, 'connect' ) );
+		add_action( 'admin_init', array( __CLASS__, 'oauth_callback' ) );
+		add_action( 'admin_post_spacefast_wordpress_oauth_start', array( __CLASS__, 'oauth_start' ) );
+		add_action( 'admin_post_spacefast_wordpress_select_space', array( __CLASS__, 'select_space' ) );
+		add_action( 'admin_post_spacefast_wordpress_change_space', array( __CLASS__, 'change_space' ) );
 		add_action( 'admin_post_spacefast_wordpress_disconnect', array( __CLASS__, 'disconnect' ) );
-		add_action( 'admin_post_spacefast_wordpress_mode', array( __CLASS__, 'save_mode' ) );
 		add_action( 'admin_post_spacefast_wordpress_test', array( __CLASS__, 'test_connection' ) );
 		add_action( 'admin_post_spacefast_wordpress_build', array( __CLASS__, 'manual_build' ) );
 		add_action( 'admin_post_spacefast_wordpress_publish', array( __CLASS__, 'manual_static_publish' ) );
@@ -24,10 +26,10 @@ final class Spacefast_Plugin {
 		add_action( 'save_post_attachment', array( __CLASS__, 'attachment_changed' ) );
 		add_action( 'edit_attachment', array( __CLASS__, 'attachment_changed' ) );
 		add_action( 'add_attachment', array( __CLASS__, 'attachment_changed' ) );
-		add_action( 'delete_attachment', array( __CLASS__, 'attachment_changed' ) );
+		add_action( 'delete_attachment', array( __CLASS__, 'deletion_changed' ) );
 		add_action( 'created_term', array( __CLASS__, 'term_changed' ) );
 		add_action( 'edited_term', array( __CLASS__, 'term_changed' ) );
-		add_action( 'delete_term', array( __CLASS__, 'term_changed' ) );
+		add_action( 'delete_term', array( __CLASS__, 'deletion_changed' ) );
 		add_action( 'wp_update_nav_menu', array( __CLASS__, 'menu_changed' ) );
 		add_action( 'profile_update', array( __CLASS__, 'user_changed' ) );
 		add_action( 'user_register', array( __CLASS__, 'user_changed' ) );
@@ -88,37 +90,117 @@ final class Spacefast_Plugin {
 		);
 	}
 
-	public static function connect(): void {
-		self::assert_admin( 'spacefast_wordpress_connect' );
-		$raw = isset( $_POST['connection'] )
-			? sanitize_textarea_field( wp_unslash( $_POST['connection'] ) )
-			: '';
+	public static function oauth_start(): void {
+		self::assert_admin( 'spacefast_wordpress_oauth_start' );
+		$mode = isset( $_POST['mode'] ) ? sanitize_key( wp_unslash( $_POST['mode'] ) ) : '';
 		try {
-			Spacefast_Settings::save( Spacefast_Settings::parse_connection( $raw ) );
-			self::notice( 'success', __( 'Spacefast connection saved.', 'spacefast-wordpress' ) );
-		} catch ( InvalidArgumentException $error ) {
+			$result = ( new Spacefast_OAuth() )->begin( $mode );
+			if ( ! $result['ok'] ) throw new RuntimeException( $result['message'] );
+			wp_redirect( esc_url_raw( (string) $result['url'] ) );
+			exit;
+		} catch ( Throwable $error ) {
 			self::notice( 'error', $error->getMessage() );
+			self::redirect();
 		}
+	}
+
+	public static function oauth_callback(): void {
+		if ( 'callback' !== ( $_GET['spacefast_oauth'] ?? '' ) ) return;
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( esc_html__( 'You are not allowed to manage Spacefast.', 'spacefast-wordpress' ), 403 );
+		}
+		if ( isset( $_GET['error'] ) ) {
+			self::notice( 'error', sanitize_text_field( wp_unslash( $_GET['error_description'] ?? $_GET['error'] ) ) );
+			self::redirect();
+		}
+		$code = sanitize_text_field( wp_unslash( $_GET['code'] ?? '' ) );
+		$state = sanitize_text_field( wp_unslash( $_GET['state'] ?? '' ) );
+		$result = ( new Spacefast_OAuth() )->finish( $code, $state );
+		self::notice(
+			$result['ok'] ? 'success' : 'error',
+			$result['ok']
+				? __( 'Team authorized. Choose the Space WordPress should use.', 'spacefast-wordpress' )
+				: $result['message']
+		);
+		self::redirect();
+	}
+
+	public static function select_space(): void {
+		self::assert_admin( 'spacefast_wordpress_select_space' );
+		$space_id = sanitize_text_field( wp_unslash( $_POST['space_id'] ?? '' ) );
+		$choices = get_option( Spacefast_OAuth::CHOICES_OPTION, array() );
+		if ( ! preg_match( '/^spc_[A-Za-z0-9_-]+$/', $space_id ) || time() > (int) ( $choices['expires_at'] ?? 0 ) ) {
+			self::notice( 'error', __( 'Space choices expired. Authorize again.', 'spacefast-wordpress' ) );
+			self::redirect();
+		}
+		$spaces = is_array( $choices['spaces'] ?? null ) ? $choices['spaces'] : array();
+		$teams = is_array( $choices['teams'] ?? null ) ? $choices['teams'] : array();
+		$space = null;
+		foreach ( $spaces as $candidate ) {
+			if ( is_array( $candidate ) && hash_equals( (string) ( $candidate['id'] ?? '' ), $space_id ) ) $space = $candidate;
+		}
+		if ( ! is_array( $space ) ) {
+			self::notice( 'error', __( 'That Space is no longer available. Authorize again.', 'spacefast-wordpress' ) );
+			self::redirect();
+		}
+		$team_id = (string) ( $space['teamId'] ?? '' );
+		$team = null;
+		foreach ( $teams as $candidate ) {
+			if ( is_array( $candidate ) && hash_equals( (string) ( $candidate['id'] ?? '' ), $team_id ) ) $team = $candidate;
+		}
+		Spacefast_Settings::merge(
+			array(
+				'team_id' => $team_id,
+				'team_name' => (string) ( $team['name'] ?? $space['teamSlug'] ?? '' ),
+				'team_slug' => (string) ( $team['slug'] ?? $space['teamSlug'] ?? '' ),
+				'space_id' => (string) $space['id'],
+				'space_name' => (string) ( $space['title'] ?? $space['name'] ?? $space['slug'] ?? '' ),
+				'space_slug' => (string) ( $space['slug'] ?? '' ),
+				'live_url' => (string) ( $space['liveUrl'] ?? '' ),
+				'verified_at' => 0,
+			)
+		);
+		$result = ( new Spacefast_Client() )->health();
+		if ( $result['ok'] ) {
+			Spacefast_Settings::merge( array( 'verified_at' => time() ) );
+			delete_option( Spacefast_OAuth::CHOICES_OPTION );
+			self::configure_simply_static();
+		}
+		self::notice(
+			$result['ok'] ? 'success' : 'error',
+			$result['ok'] ? __( 'Spacefast is connected.', 'spacefast-wordpress' ) : $result['message']
+		);
+		self::redirect();
+	}
+
+	public static function change_space(): void {
+		self::assert_admin( 'spacefast_wordpress_change_space' );
+		$result = ( new Spacefast_OAuth() )->load_choices();
+		if ( $result['ok'] ) {
+			Spacefast_Settings::merge(
+				array(
+					'space_id' => '',
+					'space_name' => '',
+					'space_slug' => '',
+					'live_url' => '',
+					'verified_at' => 0,
+				)
+			);
+		}
+		self::notice(
+			$result['ok'] ? 'success' : 'error',
+			$result['ok']
+				? __( 'Choose the new Space for this WordPress site.', 'spacefast-wordpress' )
+				: $result['message']
+		);
 		self::redirect();
 	}
 
 	public static function disconnect(): void {
 		self::assert_admin( 'spacefast_wordpress_disconnect' );
+		( new Spacefast_OAuth() )->revoke();
 		Spacefast_Settings::disconnect();
-		self::notice( 'success', __( 'Spacefast disconnected. Revoke its key in Spacefast Developer settings.', 'spacefast-wordpress' ) );
-		self::redirect();
-	}
-
-	public static function save_mode(): void {
-		self::assert_admin( 'spacefast_wordpress_mode' );
-		$mode = isset( $_POST['mode'] ) ? sanitize_key( wp_unslash( $_POST['mode'] ) ) : '';
-		try {
-			Spacefast_Settings::save_mode( $mode );
-			Spacefast_Static_Publisher::reset();
-			self::notice( 'success', __( 'Publishing mode saved.', 'spacefast-wordpress' ) );
-		} catch ( InvalidArgumentException $error ) {
-			self::notice( 'error', $error->getMessage() );
-		}
+		self::notice( 'success', __( 'Spacefast disconnected and its refresh access was revoked.', 'spacefast-wordpress' ) );
 		self::redirect();
 	}
 
@@ -192,8 +274,15 @@ final class Spacefast_Plugin {
 			return;
 		}
 		if ( 'publish' === $post->post_status ) {
-			self::record_change( 'post_deleted' );
+			self::deletion_changed();
 		}
+	}
+
+	public static function deletion_changed(): void {
+		if ( Spacefast_Settings::MODE_STATIC === Spacefast_Settings::mode() ) {
+			update_option( 'spacefast_wordpress_snapshot_required', 1, false );
+		}
+		self::record_change( 'deleted' );
 	}
 
 	public static function term_changed(): void {
@@ -263,6 +352,12 @@ final class Spacefast_Plugin {
 			if ( $generation <= (int) $snapshot['delivered'] || '' === $snapshot['event_id'] ) {
 				return;
 			}
+			Spacefast_Sync_State::mutate(
+				static function ( array $state ): array {
+					$state['last_attempt_at'] = time();
+					return $state;
+				}
+			);
 			$result = ( new Spacefast_Client() )->trigger_build( (string) $snapshot['event_id'] );
 			$current = Spacefast_Sync_State::get();
 			if ( $result['ok'] ) {
@@ -307,10 +402,24 @@ final class Spacefast_Plugin {
 		if ( ! self::simply_static_available() ) {
 			return;
 		}
+		self::configure_simply_static();
 		require_once dirname( __DIR__ ) . '/includes/class-spacefast-simply-static-task.php';
 		add_filter( 'simplystatic.archive_creation_job.task_list', array( __CLASS__, 'simply_static_tasks' ), 20, 2 );
 		add_filter( 'simply_static_class_name', array( __CLASS__, 'simply_static_task_class' ), 20, 2 );
 		add_action( 'ss_archive_creation_job_after_start_queue', array( __CLASS__, 'static_export_started' ), 20 );
+	}
+
+	private static function configure_simply_static(): void {
+		if ( Spacefast_Settings::MODE_STATIC !== Spacefast_Settings::mode() || ! self::simply_static_available() ) return;
+		$live_url = (string) Spacefast_Settings::get()['live_url'];
+		$parts = wp_parse_url( $live_url );
+		if ( ! is_array( $parts ) || empty( $parts['scheme'] ) || empty( $parts['host'] ) ) return;
+		$host = (string) $parts['host'] . ( isset( $parts['port'] ) ? ':' . (int) $parts['port'] : '' );
+		\Simply_Static\Options::instance()
+			->set( 'destination_url_type', 'absolute' )
+			->set( 'destination_scheme', (string) $parts['scheme'] . '://' )
+			->set( 'destination_host', $host )
+			->save();
 	}
 
 	public static function simply_static_available(): bool {
@@ -395,7 +504,55 @@ final class Spacefast_Plugin {
 			'label' => __( 'Spacefast connection', 'spacefast-wordpress' ),
 			'test' => array( __CLASS__, 'site_health_result' ),
 		);
+		if ( Spacefast_Settings::MODE_HEADLESS === Spacefast_Settings::mode() ) {
+			$tests['direct']['spacefast_cron'] = array(
+				'label' => __( 'Spacefast background delivery', 'spacefast-wordpress' ),
+				'test' => array( __CLASS__, 'site_health_cron_result' ),
+			);
+		}
 		return $tests;
+	}
+
+	/** @return array<string,mixed> */
+	public static function site_health_cron_result(): array {
+		$state = Spacefast_Sync_State::get();
+		$pending = (int) $state['desired'] > (int) $state['delivered'];
+		$disabled = defined( 'DISABLE_WP_CRON' ) && DISABLE_WP_CRON;
+		$missing = $pending && false === wp_next_scheduled( Spacefast_Sync_State::HOOK );
+		$delayed = $pending && ( $missing || ( 0 < (int) $state['next_at'] && (int) $state['next_at'] + 300 < time() ) );
+		$healthy = ! $disabled && ! $delayed;
+		return array(
+			'label' => $healthy
+				? __( 'Spacefast background delivery is ready', 'spacefast-wordpress' )
+				: __( 'Spacefast background delivery needs attention', 'spacefast-wordpress' ),
+			'status' => $healthy ? 'good' : 'recommended',
+			'badge' => array( 'label' => 'Spacefast', 'color' => 'blue' ),
+			'description' => '<p>' . esc_html(
+				$disabled
+					? __( 'WP-Cron is disabled. Configure the server to request wp-cron.php regularly so content changes trigger builds.', 'spacefast-wordpress' )
+					: ( $delayed
+						? __( 'A build trigger is delayed. The current live site is safe; open Settings → Spacefast and retry.', 'spacefast-wordpress' )
+						: __( 'WordPress can deliver content changes in the background.', 'spacefast-wordpress' ) )
+			) . '</p>',
+			'test' => 'spacefast_cron',
+		);
+	}
+
+	public static function status_label( string $status, bool $static_mode ): string {
+		$labels = array(
+			'idle' => __( 'Ready', 'spacefast-wordpress' ),
+			'pending' => $static_mode ? __( 'Waiting for export', 'spacefast-wordpress' ) : __( 'Changes waiting to build', 'spacefast-wordpress' ),
+			'delivered' => __( 'Build started', 'spacefast-wordpress' ),
+			'exporting' => __( 'Generating static site', 'spacefast-wordpress' ),
+			'uploading' => __( 'Publishing files', 'spacefast-wordpress' ),
+			'finalizing' => __( 'Activating new version', 'spacefast-wordpress' ),
+			'live' => __( 'Published live', 'spacefast-wordpress' ),
+			'ready' => __( 'Version ready', 'spacefast-wordpress' ),
+			'unchanged' => __( 'Already up to date', 'spacefast-wordpress' ),
+			'retrying' => __( 'Retrying automatically', 'spacefast-wordpress' ),
+			'blocked' => __( 'Needs attention', 'spacefast-wordpress' ),
+		);
+		return (string) ( $labels[ $status ] ?? __( 'Unknown', 'spacefast-wordpress' ) );
 	}
 
 	/**
@@ -433,6 +590,8 @@ final class Spacefast_Plugin {
 		$notice = get_transient( self::NOTICE_TRANSIENT );
 		delete_transient( self::NOTICE_TRANSIENT );
 		$state = Spacefast_Sync_State::get();
+		$settings = Spacefast_Settings::get();
+		$authorized = Spacefast_Settings::authorized();
 		$configured = Spacefast_Settings::configured();
 		$mode = Spacefast_Settings::mode();
 		$static_mode = Spacefast_Settings::MODE_STATIC === $mode;
@@ -443,44 +602,53 @@ final class Spacefast_Plugin {
 			<?php if ( is_array( $notice ) ) : ?>
 				<div class="notice notice-<?php echo esc_attr( 'error' === $notice['type'] ? 'error' : 'success' ); ?> is-dismissible"><p><?php echo esc_html( $notice['message'] ); ?></p></div>
 			<?php endif; ?>
-			<?php if ( ! $configured ) : ?>
-				<h2><?php esc_html_e( 'Connect', 'spacefast-wordpress' ); ?></h2>
-				<p><?php esc_html_e( 'In Spacefast, open Settings → Data sources → Connect WordPress. Paste the one-time connection below.', 'spacefast-wordpress' ); ?></p>
+			<?php if ( ! $authorized ) : ?>
+				<h2><?php esc_html_e( '1. Choose how WordPress publishes', 'spacefast-wordpress' ); ?></h2>
 				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
-					<input type="hidden" name="action" value="spacefast_wordpress_connect">
-					<?php wp_nonce_field( 'spacefast_wordpress_connect' ); ?>
-					<label class="screen-reader-text" for="spacefast-connection"><?php esc_html_e( 'Spacefast connection', 'spacefast-wordpress' ); ?></label>
-					<textarea id="spacefast-connection" name="connection" rows="6" class="large-text code" required autocomplete="off"></textarea>
-					<?php submit_button( __( 'Save connection', 'spacefast-wordpress' ) ); ?>
-				</form>
-			<?php else : ?>
-				<h2><?php esc_html_e( 'Publishing mode', 'spacefast-wordpress' ); ?></h2>
-				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="max-width:720px">
-					<input type="hidden" name="action" value="spacefast_wordpress_mode">
-					<?php wp_nonce_field( 'spacefast_wordpress_mode' ); ?>
-					<fieldset>
-						<label style="display:block;margin-bottom:10px">
-							<input type="radio" name="mode" value="static" <?php checked( $static_mode ); ?>>
-							<strong><?php esc_html_e( 'Static WordPress', 'spacefast-wordpress' ); ?></strong><br>
-							<span class="description" style="margin-left:24px"><?php esc_html_e( 'Simply Static generates the site; Spacefast publishes the generated files.', 'spacefast-wordpress' ); ?></span>
-						</label>
-						<label style="display:block">
-							<input type="radio" name="mode" value="headless" <?php checked( ! $static_mode ); ?>>
-							<strong><?php esc_html_e( 'Headless CMS', 'spacefast-wordpress' ); ?></strong><br>
-							<span class="description" style="margin-left:24px"><?php esc_html_e( 'WordPress content changes rebuild the connected Astro or other repository project.', 'spacefast-wordpress' ); ?></span>
-						</label>
+					<input type="hidden" name="action" value="spacefast_wordpress_oauth_start">
+					<?php wp_nonce_field( 'spacefast_wordpress_oauth_start' ); ?>
+					<fieldset style="max-width:720px">
+						<label style="display:block;margin-bottom:12px"><input type="radio" name="mode" value="static" required> <strong><?php esc_html_e( 'Static WordPress', 'spacefast-wordpress' ); ?></strong><br><span class="description" style="margin-left:24px"><?php esc_html_e( 'Simply Static generates the site; Spacefast publishes it.', 'spacefast-wordpress' ); ?></span></label>
+						<label style="display:block"><input type="radio" name="mode" value="headless" required> <strong><?php esc_html_e( 'Headless CMS', 'spacefast-wordpress' ); ?></strong><br><span class="description" style="margin-left:24px"><?php esc_html_e( 'Content changes rebuild the connected Astro or other repository project.', 'spacefast-wordpress' ); ?></span></label>
 					</fieldset>
-					<?php submit_button( __( 'Save mode', 'spacefast-wordpress' ), 'secondary' ); ?>
+					<h2><?php esc_html_e( '2. Authorize a Team', 'spacefast-wordpress' ); ?></h2>
+					<p><?php esc_html_e( 'You will sign in to Spacefast and choose exactly one Team this WordPress site can access.', 'spacefast-wordpress' ); ?></p>
+					<?php submit_button( __( 'Continue to Spacefast', 'spacefast-wordpress' ) ); ?>
 				</form>
+			<?php elseif ( ! $configured ) : ?>
+				<h2><?php esc_html_e( '3. Choose a Space', 'spacefast-wordpress' ); ?></h2>
+				<p><?php esc_html_e( 'Only Spaces from the Team you authorized are shown.', 'spacefast-wordpress' ); ?></p>
+				<?php $choices = get_option( Spacefast_OAuth::CHOICES_OPTION, array() ); $spaces = is_array( $choices['spaces'] ?? null ) ? $choices['spaces'] : array(); ?>
+				<?php if ( $spaces ) : ?>
+					<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="max-width:720px">
+						<input type="hidden" name="action" value="spacefast_wordpress_select_space">
+						<?php wp_nonce_field( 'spacefast_wordpress_select_space' ); ?>
+						<label for="spacefast-space"><strong><?php esc_html_e( 'Space', 'spacefast-wordpress' ); ?></strong></label><br>
+						<select id="spacefast-space" name="space_id" class="regular-text" required>
+							<option value=""><?php esc_html_e( 'Choose a Space…', 'spacefast-wordpress' ); ?></option>
+							<?php foreach ( $spaces as $space ) : if ( ! is_array( $space ) ) continue; ?>
+								<option value="<?php echo esc_attr( (string) ( $space['id'] ?? '' ) ); ?>"><?php echo esc_html( (string) ( $space['title'] ?? $space['name'] ?? $space['slug'] ?? '' ) ); ?></option>
+							<?php endforeach; ?>
+						</select>
+						<?php submit_button( __( 'Use this Space', 'spacefast-wordpress' ) ); ?>
+					</form>
+				<?php else : ?>
+					<div class="notice notice-error inline"><p><?php esc_html_e( 'No available Spaces were returned. Create a Space in the authorized Team, then reconnect.', 'spacefast-wordpress' ); ?></p></div>
+				<?php endif; ?>
+				<?php self::action_form( 'spacefast_wordpress_disconnect', __( 'Start over', 'spacefast-wordpress' ), 'secondary' ); ?>
+			<?php else : ?>
+				<div class="notice notice-success inline"><p><strong><?php esc_html_e( 'Connected', 'spacefast-wordpress' ); ?></strong> — <?php echo esc_html( (string) $settings['team_name'] ); ?> / <?php echo esc_html( (string) $settings['space_name'] ); ?></p></div>
+				<p><?php echo esc_html( $static_mode ? __( 'Static WordPress', 'spacefast-wordpress' ) : __( 'Headless CMS', 'spacefast-wordpress' ) ); ?>. <?php esc_html_e( 'This installation appears in Connected Apps with its WordPress hostname.', 'spacefast-wordpress' ); ?></p>
 				<h2><?php esc_html_e( 'Status', 'spacefast-wordpress' ); ?></h2>
 				<table class="widefat striped" style="max-width:720px"><tbody>
-					<tr><th><?php esc_html_e( 'Delivery', 'spacefast-wordpress' ); ?></th><td><?php echo esc_html( (string) $state['last_status'] ); ?></td></tr>
+					<tr><th><?php esc_html_e( 'Delivery', 'spacefast-wordpress' ); ?></th><td><strong><?php echo esc_html( self::status_label( (string) $state['last_status'], $static_mode ) ); ?></strong></td></tr>
 					<tr><th><?php esc_html_e( 'Pending changes', 'spacefast-wordpress' ); ?></th><td><?php echo esc_html( (string) max( 0, (int) $state['desired'] - (int) $state['delivered'] ) ); ?></td></tr>
-					<tr><th><?php echo esc_html( $static_mode ? __( 'Last version', 'spacefast-wordpress' ) : __( 'Last build', 'spacefast-wordpress' ) ); ?></th><td><code><?php echo esc_html( (string) ( $static_mode ? ( $state['last_version_id'] ?: '—' ) : ( $state['last_build_id'] ?: '—' ) ) ); ?></code></td></tr>
+					<?php if ( $state['last_success_at'] ) : ?><tr><th><?php esc_html_e( 'Last successful delivery', 'spacefast-wordpress' ); ?></th><td><?php echo esc_html( wp_date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), (int) $state['last_success_at'] ) ); ?></td></tr><?php endif; ?>
 					<?php if ( $state['last_message'] ) : ?><tr><th><?php esc_html_e( 'Message', 'spacefast-wordpress' ); ?></th><td><?php echo esc_html( (string) $state['last_message'] ); ?></td></tr><?php endif; ?>
 				</tbody></table>
+				<details style="max-width:720px;margin-top:12px"><summary><?php esc_html_e( 'Technical details', 'spacefast-wordpress' ); ?></summary><p><?php echo esc_html( $static_mode ? __( 'Version ID:', 'spacefast-wordpress' ) : __( 'Build ID:', 'spacefast-wordpress' ) ); ?> <code><?php echo esc_html( (string) ( $static_mode ? ( $state['last_version_id'] ?: '—' ) : ( $state['last_build_id'] ?: '—' ) ) ); ?></code></p></details>
 				<?php if ( $static_mode && ! self::simply_static_available() ) : ?>
-					<div class="notice notice-warning inline"><p><?php esc_html_e( 'Static WordPress needs the free Simply Static plugin. Install and activate it, then return here.', 'spacefast-wordpress' ); ?></p></div>
+					<div class="notice notice-warning inline"><p><?php esc_html_e( 'Static WordPress needs the free Simply Static plugin.', 'spacefast-wordpress' ); ?> <?php echo wp_kses_post( self::simply_static_action_link() ); ?></p></div>
 				<?php endif; ?>
 				<div style="display:flex;gap:8px;margin-top:16px">
 					<?php self::action_form( 'spacefast_wordpress_test', __( 'Test connection', 'spacefast-wordpress' ), 'secondary' ); ?>
@@ -491,10 +659,29 @@ final class Spacefast_Plugin {
 					<?php endif; ?>
 					<?php self::action_form( 'spacefast_wordpress_disconnect', __( 'Disconnect', 'spacefast-wordpress' ), 'delete' ); ?>
 				</div>
-				<p class="description"><?php esc_html_e( 'The connection secret is stored as a non-autoloaded WordPress option and is never displayed.', 'spacefast-wordpress' ); ?></p>
+				<details style="max-width:720px;margin-top:16px"><summary><?php esc_html_e( 'Change connection', 'spacefast-wordpress' ); ?></summary>
+					<div style="display:flex;gap:8px;margin-top:12px">
+						<?php self::action_form( 'spacefast_wordpress_change_space', __( 'Change Space', 'spacefast-wordpress' ), 'secondary' ); ?>
+						<?php self::oauth_action_form( $mode, __( 'Reauthorize Team', 'spacefast-wordpress' ) ); ?>
+						<?php self::oauth_action_form( $static_mode ? Spacefast_Settings::MODE_HEADLESS : Spacefast_Settings::MODE_STATIC, $static_mode ? __( 'Switch to Headless CMS', 'spacefast-wordpress' ) : __( 'Switch to Static WordPress', 'spacefast-wordpress' ) ); ?>
+					</div>
+				</details>
+				<p class="description"><?php esc_html_e( 'OAuth tokens are stored as non-autoloaded WordPress options and are never displayed.', 'spacefast-wordpress' ); ?></p>
 			<?php endif; ?>
 		</div>
 		<?php
+	}
+
+	private static function simply_static_action_link(): string {
+		$plugin = 'simply-static/simply-static.php';
+		if ( file_exists( WP_PLUGIN_DIR . '/' . $plugin ) ) {
+			if ( ! current_user_can( 'activate_plugins' ) ) return esc_html__( 'Ask an administrator to activate it.', 'spacefast-wordpress' );
+			$url = wp_nonce_url( self_admin_url( 'plugins.php?action=activate&plugin=' . rawurlencode( $plugin ) ), 'activate-plugin_' . $plugin );
+			return '<a href="' . esc_url( $url ) . '">' . esc_html__( 'Activate Simply Static', 'spacefast-wordpress' ) . '</a>';
+		}
+		if ( ! current_user_can( 'install_plugins' ) ) return esc_html__( 'Ask an administrator to install it.', 'spacefast-wordpress' );
+		$url = wp_nonce_url( self_admin_url( 'update.php?action=install-plugin&plugin=simply-static' ), 'install-plugin_simply-static' );
+		return '<a href="' . esc_url( $url ) . '">' . esc_html__( 'Install Simply Static', 'spacefast-wordpress' ) . '</a>';
 	}
 
 	private static function action_form( string $action, string $label, string $class ): void {
@@ -503,6 +690,17 @@ final class Spacefast_Plugin {
 			<input type="hidden" name="action" value="<?php echo esc_attr( $action ); ?>">
 			<?php wp_nonce_field( $action ); ?>
 			<button type="submit" class="button button-<?php echo esc_attr( $class ); ?>"><?php echo esc_html( $label ); ?></button>
+		</form>
+		<?php
+	}
+
+	private static function oauth_action_form( string $mode, string $label ): void {
+		?>
+		<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+			<input type="hidden" name="action" value="spacefast_wordpress_oauth_start">
+			<input type="hidden" name="mode" value="<?php echo esc_attr( $mode ); ?>">
+			<?php wp_nonce_field( 'spacefast_wordpress_oauth_start' ); ?>
+			<button type="submit" class="button button-secondary"><?php echo esc_html( $label ); ?></button>
 		</form>
 		<?php
 	}
