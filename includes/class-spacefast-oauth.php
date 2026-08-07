@@ -5,6 +5,7 @@ defined( 'ABSPATH' ) || exit;
 final class Spacefast_OAuth {
 	const PENDING_OPTION = 'spacefast_wordpress_oauth_pending';
 	const CHOICES_OPTION = 'spacefast_wordpress_oauth_choices';
+	const CREATION_OPTION = 'spacefast_wordpress_space_creation';
 	const RESOURCE_PATH = '/v1';
 
 	/** @var callable */
@@ -16,12 +17,32 @@ final class Spacefast_OAuth {
 
 	/** @return array<int,string> */
 	public static function scopes( string $mode ): array {
-		return array(
-			'teams:read',
-			'spaces:read',
-			Spacefast_Settings::MODE_STATIC === $mode ? 'spaces:publish' : 'builds:trigger',
-			'offline_access',
+		return Spacefast_Settings::MODE_STATIC === $mode
+			? array( 'teams:read', 'spaces:read', 'spaces:write', 'spaces:publish', 'offline_access' )
+			: array( 'teams:read', 'spaces:read', 'builds:trigger', 'offline_access' );
+	}
+
+	public static function has_scope( string $scope ): bool {
+		$granted = preg_split( '/\s+/', trim( (string) Spacefast_Settings::get()['scope'] ) );
+		return is_array( $granted ) && in_array( $scope, $granted, true );
+	}
+
+	/** @param array<string,mixed> $space Space returned by Spacefast. */
+	public static function remember_space_choice( array $space ): void {
+		$choices = get_option( self::CHOICES_OPTION, array() );
+		$choices = is_array( $choices ) ? $choices : array();
+		$spaces = is_array( $choices['spaces'] ?? null ) ? array_values( $choices['spaces'] ) : array();
+		$space_id = (string) ( $space['id'] ?? '' );
+		if ( ! preg_match( '/^spc_[A-Za-z0-9_-]+$/', $space_id ) ) return;
+		$spaces = array_values(
+			array_filter(
+				$spaces,
+				static fn( $candidate ): bool => ! is_array( $candidate ) || ! hash_equals( (string) ( $candidate['id'] ?? '' ), $space_id )
+			)
 		);
+		$spaces[] = $space;
+		$choices['spaces'] = $spaces;
+		update_option( self::CHOICES_OPTION, $choices, false );
 	}
 
 	public static function callback_url(): string {

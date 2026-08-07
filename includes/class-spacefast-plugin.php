@@ -15,6 +15,7 @@ final class Spacefast_Plugin {
 		add_action( 'admin_init', array( __CLASS__, 'oauth_callback' ) );
 		add_action( 'admin_post_spacefast_wordpress_oauth_start', array( __CLASS__, 'oauth_start' ) );
 		add_action( 'admin_post_spacefast_wordpress_select_space', array( __CLASS__, 'select_space' ) );
+		add_action( 'admin_post_spacefast_wordpress_create_space', array( __CLASS__, 'create_space' ) );
 		add_action( 'admin_post_spacefast_wordpress_change_space', array( __CLASS__, 'change_space' ) );
 		add_action( 'admin_post_spacefast_wordpress_disconnect', array( __CLASS__, 'disconnect' ) );
 		add_action( 'admin_post_spacefast_wordpress_test', array( __CLASS__, 'test_connection' ) );
@@ -149,9 +150,83 @@ final class Spacefast_Plugin {
 		foreach ( $teams as $candidate ) {
 			if ( is_array( $candidate ) && hash_equals( (string) ( $candidate['id'] ?? '' ), $team_id ) ) $team = $candidate;
 		}
+		$result = self::connect_space( $space, is_array( $team ) ? $team : array() );
+		self::notice(
+			$result['ok'] ? 'success' : 'error',
+			$result['ok'] ? __( 'Spacefast is connected.', 'spacefast-wordpress' ) : $result['message']
+		);
+		self::redirect();
+	}
+
+	public static function create_space(): void {
+		self::assert_admin( 'spacefast_wordpress_create_space' );
+		if ( Spacefast_Settings::MODE_STATIC !== Spacefast_Settings::mode() ) {
+			self::notice( 'error', __( 'New headless Spaces need a connected repository. Create one in Spacefast, then choose it here.', 'spacefast-wordpress' ) );
+			self::redirect();
+		}
+		if ( ! Spacefast_OAuth::has_scope( 'spaces:write' ) ) {
+			self::notice( 'error', __( 'Reauthorize Spacefast before creating a Space.', 'spacefast-wordpress' ) );
+			self::redirect();
+		}
+		$choices = get_option( Spacefast_OAuth::CHOICES_OPTION, array() );
+		$teams = is_array( $choices['teams'] ?? null ) ? array_values( $choices['teams'] ) : array();
+		if ( time() > (int) ( $choices['expires_at'] ?? 0 ) || 1 !== count( $teams ) || ! is_array( $teams[0] ) ) {
+			self::notice( 'error', __( 'Team authorization expired. Start again.', 'spacefast-wordpress' ) );
+			self::redirect();
+		}
+		$team = $teams[0];
+		$team_id = (string) ( $team['id'] ?? '' );
+		$creation = get_option( Spacefast_OAuth::CREATION_OPTION, array() );
+		$creation = is_array( $creation ) ? $creation : array();
+		$reuse_creation = $team_id === (string) ( $creation['team_id'] ?? '' )
+			&& 1 === preg_match( '/^wordpress-space-[0-9a-f-]{36}$/', (string) ( $creation['idempotency_key'] ?? '' ) );
+		if ( $reuse_creation ) {
+			$title = (string) ( $creation['title'] ?? '' );
+			$idempotency_key = (string) $creation['idempotency_key'];
+		} else {
+			$title = sanitize_text_field( wp_unslash( $_POST['space_title'] ?? '' ) );
+			if ( '' === $title ) $title = sanitize_text_field( (string) get_bloginfo( 'name' ) );
+			$idempotency_key = 'wordpress-space-' . wp_generate_uuid4();
+			$creation = array(
+				'team_id' => $team_id,
+				'title' => $title,
+				'idempotency_key' => $idempotency_key,
+			);
+		}
+		if ( ! preg_match( '/^team_[A-Za-z0-9_-]+$/', $team_id ) || '' === $title ) {
+			self::notice( 'error', __( 'Spacefast could not determine the Team or Space name.', 'spacefast-wordpress' ) );
+			self::redirect();
+		}
+		if ( ! $reuse_creation ) update_option( Spacefast_OAuth::CREATION_OPTION, $creation, false );
+		$space = $creation['space'] ?? null;
+		if ( ! is_array( $space ) || ! preg_match( '/^spc_[A-Za-z0-9_-]+$/', (string) ( $space['id'] ?? '' ) ) ) {
+			$created = ( new Spacefast_Client() )->create_space( $team_id, $title, $idempotency_key );
+			$space = $created['data']['space'] ?? null;
+			if ( ! $created['ok'] || ! is_array( $space ) || ! preg_match( '/^spc_[A-Za-z0-9_-]+$/', (string) ( $space['id'] ?? '' ) ) ) {
+				self::notice( 'error', $created['ok'] ? __( 'Spacefast returned an invalid Space.', 'spacefast-wordpress' ) : $created['message'] );
+				self::redirect();
+			}
+			$creation['space'] = $space;
+			update_option( Spacefast_OAuth::CREATION_OPTION, $creation, false );
+		}
+		Spacefast_OAuth::remember_space_choice( $space );
+		$result = self::connect_space( $space, $team );
+		self::notice(
+			$result['ok'] ? 'success' : 'error',
+			$result['ok'] ? __( 'Space created and connected.', 'spacefast-wordpress' ) : $result['message']
+		);
+		self::redirect();
+	}
+
+	/**
+	 * @param array<string,mixed> $space Spacefast Space.
+	 * @param array<string,mixed> $team Authorized Team.
+	 * @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>}
+	 */
+	private static function connect_space( array $space, array $team ): array {
 		Spacefast_Settings::merge(
 			array(
-				'team_id' => $team_id,
+				'team_id' => (string) ( $space['teamId'] ?? $team['id'] ?? '' ),
 				'team_name' => (string) ( $team['name'] ?? $space['teamSlug'] ?? '' ),
 				'team_slug' => (string) ( $team['slug'] ?? $space['teamSlug'] ?? '' ),
 				'space_id' => (string) $space['id'],
@@ -165,13 +240,10 @@ final class Spacefast_Plugin {
 		if ( $result['ok'] ) {
 			Spacefast_Settings::merge( array( 'verified_at' => time() ) );
 			delete_option( Spacefast_OAuth::CHOICES_OPTION );
+			delete_option( Spacefast_OAuth::CREATION_OPTION );
 			self::configure_simply_static();
 		}
-		self::notice(
-			$result['ok'] ? 'success' : 'error',
-			$result['ok'] ? __( 'Spacefast is connected.', 'spacefast-wordpress' ) : $result['message']
-		);
-		self::redirect();
+		return $result;
 	}
 
 	public static function change_space(): void {
@@ -609,6 +681,7 @@ final class Spacefast_Plugin {
 		$configured = Spacefast_Settings::configured();
 		$mode = Spacefast_Settings::mode();
 		$static_mode = Spacefast_Settings::MODE_STATIC === $mode;
+		$can_create_space = Spacefast_OAuth::has_scope( 'spaces:write' );
 		?>
 		<div class="wrap">
 			<h1><?php esc_html_e( 'Spacefast', 'spacefast-wordpress' ); ?></h1>
@@ -647,7 +720,24 @@ final class Spacefast_Plugin {
 						<?php submit_button( __( 'Use this Space', 'spacefast-wordpress' ) ); ?>
 					</form>
 				<?php else : ?>
-					<div class="notice notice-error inline"><p><?php esc_html_e( 'No available Spaces were returned. Create a Space in the authorized Team, then reconnect.', 'spacefast-wordpress' ); ?></p></div>
+					<?php if ( ! $static_mode ) : ?><div class="notice notice-error inline"><p><?php esc_html_e( 'No repository-backed Spaces are available. Create one in Spacefast, connect its repository, then reconnect.', 'spacefast-wordpress' ); ?></p></div><?php endif; ?>
+				<?php endif; ?>
+				<?php $creation = get_option( Spacefast_OAuth::CREATION_OPTION, array() ); $creation = is_array( $creation ) ? $creation : array(); $created_space = is_array( $creation['space'] ?? null ) ? $creation['space'] : null; ?>
+				<?php if ( $static_mode && $can_create_space && ! $created_space ) : ?>
+					<h3><?php echo esc_html( $spaces ? __( 'Or create a new Space', 'spacefast-wordpress' ) : __( 'Create your first Space', 'spacefast-wordpress' ) ); ?></h3>
+					<p><?php esc_html_e( 'Spacefast will create it in the authorized Team and connect this WordPress site immediately.', 'spacefast-wordpress' ); ?></p>
+					<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="max-width:720px">
+						<input type="hidden" name="action" value="spacefast_wordpress_create_space">
+						<?php wp_nonce_field( 'spacefast_wordpress_create_space' ); ?>
+						<label for="spacefast-space-title"><strong><?php esc_html_e( 'Space name', 'spacefast-wordpress' ); ?></strong></label><br>
+						<input id="spacefast-space-title" name="space_title" type="text" class="regular-text" maxlength="255" required value="<?php echo esc_attr( (string) ( $creation['title'] ?? get_bloginfo( 'name' ) ) ); ?>">
+						<?php submit_button( __( 'Create and connect', 'spacefast-wordpress' ) ); ?>
+					</form>
+				<?php elseif ( $static_mode && $created_space ) : ?>
+					<div class="notice notice-warning inline"><p><?php esc_html_e( 'The Space was created but connection verification did not finish. Select it above to retry safely.', 'spacefast-wordpress' ); ?></p></div>
+				<?php elseif ( $static_mode ) : ?>
+					<div class="notice notice-warning inline"><p><?php esc_html_e( 'Reauthorize Spacefast to create a new Space from WordPress.', 'spacefast-wordpress' ); ?></p></div>
+					<?php self::oauth_action_form( Spacefast_Settings::MODE_STATIC, __( 'Reauthorize to create a Space', 'spacefast-wordpress' ) ); ?>
 				<?php endif; ?>
 				<?php self::action_form( 'spacefast_wordpress_disconnect', __( 'Start over', 'spacefast-wordpress' ), 'secondary' ); ?>
 			<?php else : ?>
