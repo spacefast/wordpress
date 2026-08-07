@@ -22,11 +22,15 @@ spacefast_accept(
 	'Space selection handler is not registered.'
 );
 spacefast_accept(
+	10 === has_action( 'admin_post_spacefast_wordpress_create_space', array( 'Spacefast_Plugin', 'create_space' ) ),
+	'Space creation handler is not registered.'
+);
+spacefast_accept(
 	10 === has_action( 'admin_post_spacefast_wordpress_change_space', array( 'Spacefast_Plugin', 'change_space' ) ),
 	'Space change handler is not registered.'
 );
 spacefast_accept(
-	array( 'teams:read', 'spaces:read', 'spaces:publish', 'offline_access' ) === Spacefast_OAuth::scopes( Spacefast_Settings::MODE_STATIC ),
+	array( 'teams:read', 'spaces:read', 'spaces:write', 'spaces:publish', 'offline_access' ) === Spacefast_OAuth::scopes( Spacefast_Settings::MODE_STATIC ),
 	'Static mode requested unexpected OAuth scopes.'
 );
 spacefast_accept(
@@ -71,7 +75,7 @@ spacefast_accept(
 );
 
 $plugin = get_plugin_data( WP_PLUGIN_DIR . '/spacefast-wordpress/spacefast-wordpress.php', false, false );
-spacefast_accept( '0.3.2' === $plugin['Version'], 'Unexpected plugin version.' );
+spacefast_accept( '0.4.0' === $plugin['Version'], 'Unexpected plugin version.' );
 spacefast_accept( 'https://github.com/spacefast/wordpress' === $plugin['UpdateURI'], 'Update URI is missing.' );
 
 Spacefast_Settings::disconnect();

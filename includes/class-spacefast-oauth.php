@@ -16,12 +16,9 @@ final class Spacefast_OAuth {
 
 	/** @return array<int,string> */
 	public static function scopes( string $mode ): array {
-		return array(
-			'teams:read',
-			'spaces:read',
-			Spacefast_Settings::MODE_STATIC === $mode ? 'spaces:publish' : 'builds:trigger',
-			'offline_access',
-		);
+		return Spacefast_Settings::MODE_STATIC === $mode
+			? array( 'teams:read', 'spaces:read', 'spaces:write', 'spaces:publish', 'offline_access' )
+			: array( 'teams:read', 'spaces:read', 'builds:trigger', 'offline_access' );
 	}
 
 	public static function callback_url(): string {

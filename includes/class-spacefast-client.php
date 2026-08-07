@@ -107,6 +107,18 @@ final class Spacefast_Client {
 	}
 
 	/** @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>} */
+	public function create_space( string $team_id, string $title ): array {
+		return $this->request(
+			'POST',
+			'/v1/spaces',
+			array(
+				'teamId' => $team_id,
+				'title' => $title,
+			)
+		);
+	}
+
+	/** @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>} */
 	private function list_all( string $path ): array {
 		$items = array();
 		$cursor = '';

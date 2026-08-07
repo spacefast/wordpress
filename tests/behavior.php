@@ -184,8 +184,8 @@ function raw_response( int $status, array $data = array() ): array {
 }
 
 check(
-	array( 'teams:read', 'spaces:read', 'spaces:publish', 'offline_access' ) === Spacefast_OAuth::scopes( Spacefast_Settings::MODE_STATIC ),
-	'static OAuth asks only for Team discovery, Space discovery, publishing, and refresh access'
+	array( 'teams:read', 'spaces:read', 'spaces:write', 'spaces:publish', 'offline_access' ) === Spacefast_OAuth::scopes( Spacefast_Settings::MODE_STATIC ),
+	'static OAuth asks for Team discovery, Space creation and discovery, publishing, and refresh access'
 );
 check(
 	array( 'teams:read', 'spaces:read', 'builds:trigger', 'offline_access' ) === Spacefast_OAuth::scopes( Spacefast_Settings::MODE_HEADLESS ),
@@ -271,6 +271,32 @@ check(
 	'encodes and follows the opaque Space cursor'
 );
 check( ! Spacefast_Settings::configured(), 'authorization alone is not presented as Connected' );
+
+$create_requests = array();
+$creating_client = new Spacefast_Client(
+	static function ( string $url, array $args ) use ( &$create_requests ): array {
+		$create_requests[] = array( $url, $args );
+		return response(
+			201,
+			array(
+				'space' => array(
+					'id' => 'spc_created',
+					'teamId' => 'team_demo',
+					'slug' => 'spacefast-launchpad',
+					'title' => 'Spacefast Launchpad',
+					'liveUrl' => 'https://spacefast-launchpad.view.fast',
+				),
+			)
+		);
+	}
+);
+$created_space = $creating_client->create_space( 'team_demo', 'Spacefast Launchpad' );
+check( true === $created_space['ok'], 'creates a Space with the authorized OAuth token' );
+check( '/v1/spaces' === parse_url( $create_requests[0][0], PHP_URL_PATH ), 'uses the canonical Space creation endpoint' );
+check(
+	array( 'teamId' => 'team_demo', 'title' => 'Spacefast Launchpad' ) === json_decode( $create_requests[0][1]['body'], true ),
+	'creates the Space in the authorized Team with the WordPress site name'
+);
 
 $reauthorization = $oauth->begin( Spacefast_Settings::MODE_HEADLESS );
 $reauthorization_pending = get_option( Spacefast_OAuth::PENDING_OPTION );
