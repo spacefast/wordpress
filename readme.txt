@@ -3,7 +3,7 @@ Contributors: spacefast
 Tags: static site, headless cms, simply static, deployment
 Requires at least: 6.5
 Requires PHP: 8.1
-Stable tag: 0.4.0
+Stable tag: 0.5.0
 License: GPLv2 or later
 
 Publish a Simply Static export to Spacefast, or rebuild a headless site when WordPress content changes.
@@ -20,16 +20,25 @@ Both modes include a manual action in Settings > Spacefast. Headless repository 
 == Installation ==
 
 1. Download and activate this plugin.
-2. Open Settings > Spacefast and choose Static WordPress or Headless CMS.
-3. Continue to Spacefast, sign in, and authorize one Team.
-4. Back in WordPress, choose the Space to publish or rebuild.
-5. For Static WordPress, use the provided link to install or activate Simply Static.
+2. Open Settings > Spacefast and select Publish with Spacefast.
+3. Install Simply Static from the same action when prompted, then authorize one Team in Spacefast.
+4. Back in WordPress, create a Space with the suggested name or choose an existing one.
+5. Wait for the first version to publish. The plugin shows the live URL when it is ready.
 
 == Security ==
 
-OAuth access is limited to the Team you authorize and the mode you choose. WordPress then verifies the selected Space before showing Connected. Tokens are stored in non-autoloaded options and are never displayed.
+OAuth access is limited to the Team you authorize and the mode you choose. WordPress syncs only the selected Space and waits for a real first publish or build before showing the connection as complete. Tokens are stored in non-autoloaded options and are never displayed.
 
 == Changelog ==
+
+= 0.5.0 =
+* Replace the mode-first wizard with a WordPress-first Publish with Spacefast journey.
+* Install and activate Simply Static from the primary setup action when permitted.
+* Create or choose a Space in WordPress, then verify the first live publish or build before showing Connected.
+* Automatically publish static-site changes as well as headless content changes with one debounced delivery lane.
+* Keep at most one headless build active and coalesce edits into one successor.
+* Sync WordPress title, description, search visibility, and headless source settings without overwriting unrelated Space configuration.
+* Put diagnostics and connection management behind secondary disclosures.
 
 = 0.4.0 =
 * Create and connect a new Space directly from the Static WordPress setup flow.

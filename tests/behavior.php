@@ -143,6 +143,7 @@ $wpdb = new Spacefast_Test_Wpdb();
 
 require_once dirname( __DIR__ ) . '/includes/class-spacefast-sync-state.php';
 require_once dirname( __DIR__ ) . '/includes/class-spacefast-settings.php';
+require_once dirname( __DIR__ ) . '/includes/class-spacefast-site-settings.php';
 require_once dirname( __DIR__ ) . '/includes/class-spacefast-oauth.php';
 require_once dirname( __DIR__ ) . '/includes/class-spacefast-client.php';
 require_once dirname( __DIR__ ) . '/includes/class-spacefast-static-publisher.php';
@@ -188,8 +189,8 @@ check(
 	'static OAuth asks for Team discovery, Space creation and discovery, publishing, and refresh access'
 );
 check(
-	array( 'teams:read', 'spaces:read', 'builds:trigger', 'offline_access' ) === Spacefast_OAuth::scopes( Spacefast_Settings::MODE_HEADLESS ),
-	'headless OAuth asks only for Team discovery, Space discovery, builds, and refresh access'
+	array( 'teams:read', 'spaces:read', 'spaces:write', 'builds:trigger', 'offline_access' ) === Spacefast_OAuth::scopes( Spacefast_Settings::MODE_HEADLESS ),
+	'headless OAuth can sync the WordPress source before triggering builds'
 );
 Spacefast_Settings::merge( array( 'scope' => 'teams:read spaces:read spaces:publish offline_access' ) );
 check( ! Spacefast_OAuth::has_scope( 'spaces:write' ), 'upgraded static authorization does not imply Space management access' );
@@ -213,7 +214,7 @@ $oauth_transport = static function ( string $url, array $args ) use ( &$oauth_re
 				'access_token' => 'oauth_access',
 				'refresh_token' => 'oauth_refresh',
 				'expires_in' => 900,
-				'scope' => 'teams:read spaces:read builds:trigger offline_access',
+				'scope' => 'teams:read spaces:read spaces:write builds:trigger offline_access',
 			)
 		);
 	}
@@ -350,7 +351,7 @@ $connection = array(
 	'access_token' => 'access_secret',
 	'refresh_token' => 'refresh_secret',
 	'expires_at' => time() + 3600,
-	'scope' => 'teams:read spaces:read builds:trigger offline_access',
+	'scope' => 'teams:read spaces:read spaces:write builds:trigger offline_access',
 	'team_id' => 'team_demo',
 	'team_name' => 'Demo Team',
 	'team_slug' => 'demo-team',
@@ -360,6 +361,13 @@ $connection = array(
 	'live_url' => 'https://demo.spacefast.site',
 	'verified_at' => time(),
 );
+Spacefast_Settings::merge( $connection );
+$resume_authorization = $oauth->begin( Spacefast_Settings::MODE_HEADLESS );
+check( true === $resume_authorization['ok'], 'connected installations can reauthorize in place' );
+$resume_pending = get_option( Spacefast_OAuth::PENDING_OPTION );
+$resumed = $oauth->finish( 'resume-code', (string) $resume_pending['state'] );
+check( true === ( $resumed['resumed'] ?? false ), 'reauthorization resumes the existing accessible Space' );
+check( 'spc_demo' === Spacefast_Settings::get()['space_id'], 'reauthorization does not force another Space selection' );
 
 $state = Spacefast_Sync_State::record_change(
 	Spacefast_Sync_State::defaults(),
@@ -374,7 +382,9 @@ check( 0 < $state['last_change_at'], 'records when the latest public content cha
 $state['desired'] = 3;
 $ack = Spacefast_Sync_State::acknowledge( $state, 2, 'bld_test' );
 check( 2 === $ack['delivered'], 'acknowledges only observed generation' );
-check( 'pending' === $ack['last_status'], 'preserves an edit arriving during delivery' );
+check( 'building' === $ack['last_status'], 'keeps the active build visible until it reaches a terminal state' );
+$terminal = Spacefast_Sync_State::acknowledge_build_terminal( $ack, 'succeeded' );
+check( 'pending' === $terminal['last_status'], 'queues one successor when an edit arrived during the build' );
 check( 60 === Spacefast_Sync_State::retry_delay( 1 ), 'starts bounded backoff' );
 check( DAY_IN_SECONDS === Spacefast_Sync_State::retry_delay( 99 ), 'caps backoff' );
 
@@ -403,7 +413,38 @@ $cas_ack = Spacefast_Sync_State::mutate(
 check( 2 === $cas_ack['desired'], 'CAS preserves a concurrent content generation' );
 check( 1 === $cas_ack['delivered'], 'CAS acknowledges only the delivered generation' );
 check( 'event-two' === $cas_ack['event_id'], 'CAS preserves the successor event id' );
-check( 'pending' === $cas_ack['last_status'], 'CAS leaves the successor pending' );
+check( 'building' === $cas_ack['last_status'], 'CAS keeps the accepted build active while preserving its successor' );
+
+$mapping = Spacefast_Site_Settings::patch(
+	array(
+		'title' => 'Old title',
+		'noindex' => false,
+		'settingsDigest' => str_repeat( 'a', 64 ),
+		'config' => array(
+			'cleanUrls' => true,
+			'dataSources' => array(
+				'catalog' => array( 'kind' => 'wordpress', 'url' => 'https://catalog.example.test' ),
+			),
+		),
+	),
+	array( 'sync_title' => true, 'sync_visibility' => true, 'sync_source' => true ),
+	array(
+		'title' => 'New WordPress title',
+		'description' => 'A synced description.',
+		'noindex' => true,
+		'source_url' => 'https://wp.example.test',
+	),
+	Spacefast_Settings::MODE_HEADLESS
+);
+check( true === $mapping['config']['cleanUrls'], 'settings sync preserves unrelated Space config' );
+check( isset( $mapping['config']['dataSources']['catalog'] ), 'settings sync preserves unrelated data sources' );
+check(
+	array( 'kind' => 'wordpress', 'url' => 'https://wp.example.test' ) === $mapping['config']['dataSources']['wordpress'],
+	'settings sync configures this WordPress site as a source'
+);
+check( 'wordpress' === $mapping['config']['defaultDataSource'], 'settings sync makes the connected WordPress source the build default' );
+check( true === $mapping['noindex'], 'settings sync mirrors WordPress search visibility' );
+check( str_repeat( 'a', 64 ) === $mapping['baseSettingsDigest'], 'settings sync uses the current compare-and-swap base' );
 
 Spacefast_Sync_State::save( Spacefast_Sync_State::defaults() );
 check(
@@ -477,6 +518,10 @@ $GLOBALS['spacefast_post_types']['post']     = (object) array(
 	'public'       => true,
 	'show_in_rest' => true,
 );
+$GLOBALS['spacefast_post_types']['legacy_public'] = (object) array(
+	'public'       => true,
+	'show_in_rest' => false,
+);
 $before_delete = Spacefast_Sync_State::get();
 Spacefast_Plugin::post_deleted( 1, new WP_Post( 'internal', 'publish' ) );
 check(
@@ -489,6 +534,20 @@ Spacefast_Plugin::post_deleted( 2, new WP_Post( 'post', 'publish' ) );
 check(
 	$before_delete['desired'] + 1 === Spacefast_Sync_State::get()['desired'],
 	'rebuilds after deleting a public REST-visible post'
+);
+$headless_generation = Spacefast_Sync_State::get()['desired'];
+$change_recorded->setValue( null, false );
+Spacefast_Plugin::post_deleted( 3, new WP_Post( 'legacy_public', 'publish' ) );
+check(
+	$headless_generation === Spacefast_Sync_State::get()['desired'],
+	'headless mode ignores public content unavailable through the REST API'
+);
+Spacefast_Settings::merge( array( 'mode' => Spacefast_Settings::MODE_STATIC ) );
+$change_recorded->setValue( null, false );
+Spacefast_Plugin::post_deleted( 4, new WP_Post( 'legacy_public', 'publish' ) );
+check(
+	$headless_generation + 1 === Spacefast_Sync_State::get()['desired'],
+	'static mode republishes public content even when it is not REST-visible'
 );
 
 Spacefast_Settings::merge( $connection );
@@ -671,6 +730,10 @@ $create_body = json_decode( $static_requests[0][1]['body'], true );
 check( 'snapshot' === $create_body['publishMode'], 'publishes the export as an exact snapshot' );
 check( array( 'channel' => 'live' ) === $create_body['finalize'], 'requests live auto-finalize up front' );
 check(
+	'https://wp.example.test' === $create_body['source']['metadata']['siteUrl'],
+	'attributes the published version to its public WordPress site'
+);
+check(
 	str_ends_with( $static_requests[1][3], '/index.html' ),
 	'uploads only the file named by the opaque server target'
 );
@@ -680,14 +743,15 @@ check(
 );
 
 Spacefast_Sync_State::save(
-	array_merge( Spacefast_Sync_State::defaults(), array( 'desired' => 1 ) )
+	array_merge( Spacefast_Sync_State::defaults(), array( 'desired' => 2, 'active_generation' => 1 ) )
 );
 $static_ack = Spacefast_Sync_State::acknowledge_static(
 	Spacefast_Sync_State::get(),
 	'ver_static',
 	'live'
 );
-check( 'live' === $static_ack['last_status'], 'records verified live publication separately from builds' );
+check( 'pending' === $static_ack['last_status'], 'a change during export remains queued for one successor publish' );
+check( 1 === $static_ack['delivered'], 'static publishing acknowledges only the generation that was exported' );
 check( 'ver_static' === $static_ack['last_version_id'], 'keeps the last static version id' );
 
 unlink( $archive . '/assets/app.js' );

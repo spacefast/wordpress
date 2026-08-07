@@ -24,6 +24,9 @@ final class Spacefast_Sync_State {
 			'last_change_at' => 0,
 			'last_attempt_at' => 0,
 			'last_success_at' => 0,
+			'last_settings_sync_at' => 0,
+			'active_generation' => 0,
+			'settings_pending' => false,
 		);
 	}
 
@@ -56,7 +59,10 @@ final class Spacefast_Sync_State {
 		$state['attempts'] = 0;
 		$state['next_at'] = 0;
 		$state['last_change_at'] = time();
-		$state['last_status'] = 'pending';
+		$active_status = (string) $state['last_status'];
+		$state['last_status'] = in_array( $active_status, array( 'building', 'exporting', 'uploading', 'finalizing' ), true )
+			? $active_status
+			: 'pending';
 		$state['last_message'] = '';
 		return $state;
 	}
@@ -72,10 +78,33 @@ final class Spacefast_Sync_State {
 		$state['delivered'] = max( (int) $state['delivered'], $generation );
 		$state['attempts'] = 0;
 		$state['next_at'] = 0;
-		$state['last_status'] = (int) $state['desired'] > $generation ? 'pending' : 'delivered';
+		$state['last_status'] = 'building';
 		$state['last_message'] = '';
 		$state['last_build_id'] = $build_id;
-		$state['last_success_at'] = time();
+		return $state;
+	}
+
+	/** @param array<string,mixed> $state State. @return array<string,mixed> */
+	public static function acknowledge_build_terminal( array $state, string $status, string $message = '' ): array {
+		$state = array_merge( self::defaults(), $state );
+		if ( 'succeeded' === $status ) {
+			$state['last_status'] = (int) $state['desired'] > (int) $state['delivered'] ? 'pending' : 'live';
+			$state['last_message'] = '';
+			$state['last_success_at'] = time();
+			return $state;
+		}
+		$state['last_status'] = 'blocked';
+		$state['last_message'] = '' !== $message
+			? $message
+			: 'The build did not finish successfully. The previous live version is safe.';
+		return $state;
+	}
+
+	/** @param array<string,mixed> $state State. @return array<string,mixed> */
+	public static function acknowledge_settings_sync( array $state ): array {
+		$state = array_merge( self::defaults(), $state );
+		$state['last_settings_sync_at'] = time();
+		$state['settings_pending'] = false;
 		return $state;
 	}
 
@@ -85,13 +114,14 @@ final class Spacefast_Sync_State {
 	 */
 	public static function acknowledge_static( array $state, string $version_id, string $status ): array {
 		$state = array_merge( self::defaults(), $state );
-		$state['delivered'] = (int) $state['desired'];
+		$state['delivered'] = max( (int) $state['delivered'], (int) $state['active_generation'] );
 		$state['attempts'] = 0;
 		$state['next_at'] = 0;
-		$state['last_status'] = $status;
+		$state['last_status'] = (int) $state['desired'] > (int) $state['delivered'] ? 'pending' : $status;
 		$state['last_message'] = '';
 		$state['last_version_id'] = $version_id;
 		$state['last_success_at'] = time();
+		$state['active_generation'] = 0;
 		return $state;
 	}
 

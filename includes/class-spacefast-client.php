@@ -120,6 +120,25 @@ final class Spacefast_Client {
 	}
 
 	/** @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>} */
+	public function get_space(): array {
+		$settings = Spacefast_Settings::get();
+		return $this->request( 'GET', '/v1/spaces/' . rawurlencode( (string) $settings['space_id'] ) );
+	}
+
+	/**
+	 * @param array<string,mixed> $body Space settings patch.
+	 * @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>}
+	 */
+	public function update_space( array $body ): array {
+		$settings = Spacefast_Settings::get();
+		return $this->request(
+			'PATCH',
+			'/v1/spaces/' . rawurlencode( (string) $settings['space_id'] ),
+			$body
+		);
+	}
+
+	/** @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>} */
 	private function list_all( string $path ): array {
 		$items = array();
 		$cursor = '';
@@ -219,6 +238,20 @@ final class Spacefast_Client {
 		return $result;
 	}
 
+	/** @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>} */
+	public function get_build( string $build_id ): array {
+		if ( ! preg_match( '/^bld_[A-Za-z0-9_-]+$/', $build_id ) ) {
+			return array(
+				'ok' => false,
+				'retryable' => false,
+				'code' => 'invalid_build_id',
+				'message' => 'Spacefast returned an invalid build receipt.',
+				'data' => array(),
+			);
+		}
+		return $this->request( 'GET', '/v1/builds/' . rawurlencode( $build_id ) );
+	}
+
 	/**
 	 * @param array<int,array{path:string,size:int,sha256:string}> $files Files.
 	 * @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>}
@@ -239,6 +272,7 @@ final class Spacefast_Client {
 					'metadata' => array(
 						'integration' => 'wordpress',
 						'exporter' => 'simply-static',
+						'siteUrl' => untrailingslashit( home_url() ),
 					),
 				),
 			),
