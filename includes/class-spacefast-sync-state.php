@@ -7,7 +7,7 @@ final class Spacefast_Sync_State {
 	const HOOK = 'spacefast_wordpress_deliver';
 
 	/**
-	 * @return array{desired:int,delivered:int,event_id:string,reasons:array<int,string>,attempts:int,next_at:int,last_status:string,last_message:string,last_build_id:string,last_version_id:string}
+	 * @return array{desired:int,delivered:int,event_id:string,reasons:array<int,string>,attempts:int,next_at:int,last_status:string,last_message:string,last_build_id:string,last_version_id:string,last_change_at:int}
 	 */
 	public static function defaults(): array {
 		return array(
@@ -21,13 +21,14 @@ final class Spacefast_Sync_State {
 			'last_message' => '',
 			'last_build_id' => '',
 			'last_version_id' => '',
+			'last_change_at' => 0,
 			'last_attempt_at' => 0,
 			'last_success_at' => 0,
 		);
 	}
 
 	/**
-	 * @return array{desired:int,delivered:int,event_id:string,reasons:array<int,string>,attempts:int,next_at:int,last_status:string,last_message:string,last_build_id:string,last_version_id:string}
+	 * @return array{desired:int,delivered:int,event_id:string,reasons:array<int,string>,attempts:int,next_at:int,last_status:string,last_message:string,last_build_id:string,last_version_id:string,last_change_at:int}
 	 */
 	public static function get(): array {
 		$value = get_option( self::OPTION, array() );
@@ -54,6 +55,7 @@ final class Spacefast_Sync_State {
 		);
 		$state['attempts'] = 0;
 		$state['next_at'] = 0;
+		$state['last_change_at'] = time();
 		$state['last_status'] = 'pending';
 		$state['last_message'] = '';
 		return $state;

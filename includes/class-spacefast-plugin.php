@@ -3,6 +3,7 @@
 defined( 'ABSPATH' ) || exit;
 
 final class Spacefast_Plugin {
+	const AUTOMATIC_DEBOUNCE_SECONDS = MINUTE_IN_SECONDS;
 	const LOCK_OPTION = 'spacefast_wordpress_worker_lock';
 	const NOTICE_TRANSIENT = 'spacefast_wordpress_admin_notice';
 
@@ -48,7 +49,7 @@ final class Spacefast_Plugin {
 		}
 		$state = Spacefast_Sync_State::get();
 		if ( (int) $state['desired'] > (int) $state['delivered'] ) {
-			self::schedule( time() + 15 );
+			self::schedule_after_change( (int) $state['last_change_at'] );
 		}
 	}
 
@@ -225,6 +226,7 @@ final class Spacefast_Plugin {
 			self::redirect();
 		}
 		self::record_change( 'manual' );
+		wp_clear_scheduled_hook( Spacefast_Sync_State::HOOK );
 		self::deliver();
 		self::redirect();
 	}
@@ -311,14 +313,26 @@ final class Spacefast_Plugin {
 		}
 		self::$change_recorded = true;
 		$event_id = (string) wp_generate_uuid4();
-		Spacefast_Sync_State::mutate(
+		$state = Spacefast_Sync_State::mutate(
 			static fn( array $state ): array => Spacefast_Sync_State::record_change(
 				$state,
 				$reason,
 				$event_id
 			)
 		);
-		self::schedule( time() + 15 );
+		self::schedule_after_change( (int) $state['last_change_at'] );
+	}
+
+	private static function schedule_after_change( int $changed_at ): void {
+		$timestamp = max( time() + 1, $changed_at + self::AUTOMATIC_DEBOUNCE_SECONDS );
+		$scheduled = wp_next_scheduled( Spacefast_Sync_State::HOOK );
+		if ( $scheduled === $timestamp ) {
+			return;
+		}
+		if ( $scheduled ) {
+			wp_unschedule_event( $scheduled, Spacefast_Sync_State::HOOK );
+		}
+		wp_schedule_single_event( $timestamp, Spacefast_Sync_State::HOOK );
 	}
 
 	private static function schedule( int $timestamp ): void {
@@ -372,7 +386,7 @@ final class Spacefast_Plugin {
 					)
 				);
 				if ( (int) $current['desired'] > (int) $current['delivered'] ) {
-					self::schedule( time() + 15 );
+					self::schedule_after_change( (int) $current['last_change_at'] );
 				}
 				return;
 			}

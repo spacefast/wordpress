@@ -40,6 +40,9 @@ Spacefast_Settings::merge(
 		'access_token' => 'acceptance-access',
 		'refresh_token' => 'acceptance-refresh',
 		'expires_at' => time() + 900,
+		'team_id' => 'team_acceptance',
+		'space_id' => 'spc_acceptance',
+		'verified_at' => time(),
 	)
 );
 global $wpdb;
@@ -51,8 +54,24 @@ $autoload = $wpdb->get_var(
 );
 spacefast_accept( ! in_array( $autoload, array( 'yes', 'on', 'auto-on' ), true ), 'OAuth tokens are autoloaded.' );
 
+$changed_at = time();
+$post_id = wp_insert_post(
+	array(
+		'post_title' => 'Debounce acceptance',
+		'post_status' => 'publish',
+		'post_type' => 'post',
+	)
+);
+spacefast_accept( ! is_wp_error( $post_id ), 'Could not publish acceptance content.' );
+$scheduled_at = wp_next_scheduled( Spacefast_Sync_State::HOOK );
+spacefast_accept( false !== $scheduled_at, 'Publishing public content did not schedule a build.' );
+spacefast_accept(
+	$scheduled_at >= $changed_at + 59 && $scheduled_at <= time() + 61,
+	'Public content did not receive the 60-second quiet window.'
+);
+
 $plugin = get_plugin_data( WP_PLUGIN_DIR . '/spacefast-wordpress/spacefast-wordpress.php', false, false );
-spacefast_accept( '0.3.0' === $plugin['Version'], 'Unexpected plugin version.' );
+spacefast_accept( '0.3.1' === $plugin['Version'], 'Unexpected plugin version.' );
 spacefast_accept( 'https://github.com/spacefast/wordpress' === $plugin['UpdateURI'], 'Update URI is missing.' );
 
 Spacefast_Settings::disconnect();

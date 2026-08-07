@@ -50,12 +50,15 @@ WordPress REST API during its build. Publishing, updating, unpublishing, or
 deleting public REST-visible post types, taxonomy changes, navigation changes,
 media changes, and public user changes schedule a production build. Autosaves,
 revisions, and draft-only transitions are ignored. Multiple hooks in one
-request collapse into one generation.
+request collapse into one generation. Each new public-content change restarts a
+60-second quiet window, so editing a batch of content produces one build.
+Merely opening or navigating wp-admin does not schedule anything.
 
 Delivery uses WP-Cron with a stable idempotency key. Network failures, timeouts,
 rate limits, and server errors retry with bounded exponential backoff. A change
-arriving while a delivery runs remains pending and schedules one successor.
-**Build now** uses the same path immediately. The generic **Build now** action
+arriving while a delivery runs remains pending and schedules one successor after
+the quiet window. **Build now** skips the window, runs immediately, and clears
+the superseded scheduled event. The generic **Build now** action
 in the Spacefast dashboard triggers the same connected production repository.
 
 The plugin sends no post content, title, author, or other WordPress data to

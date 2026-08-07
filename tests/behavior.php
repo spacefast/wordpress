@@ -321,6 +321,7 @@ $state = Spacefast_Sync_State::record_change( $state, 'taxonomy', 'event-two' );
 check( 2 === $state['desired'], 'increments desired generation' );
 check( 'event-two' === $state['event_id'], 'keeps latest stable event id' );
 check( array( 'postpublished', 'taxonomy' ) === $state['reasons'], 'coalesces reasons' );
+check( 0 < $state['last_change_at'], 'records when the latest public content change happened' );
 $state['desired'] = 3;
 $ack = Spacefast_Sync_State::acknowledge( $state, 2, 'bld_test' );
 check( 2 === $ack['delivered'], 'acknowledges only observed generation' );
@@ -372,13 +373,19 @@ check(
 Spacefast_Sync_State::release_lock( 'spacefast_test_lock', 'owner-a' );
 check( false === get_option( 'spacefast_test_lock', false ), 'owner releases lock' );
 
-$schedule = new ReflectionMethod( Spacefast_Plugin::class, 'schedule' );
-$GLOBALS['spacefast_scheduled'][ Spacefast_Sync_State::HOOK ] = time() + DAY_IN_SECONDS;
-$earlier = time() + 15;
-$schedule->invoke( null, $earlier );
+$debounce = new ReflectionMethod( Spacefast_Plugin::class, 'schedule_after_change' );
+$changed_at = time();
+$GLOBALS['spacefast_scheduled'][ Spacefast_Sync_State::HOOK ] = $changed_at + 10;
+$debounce->invoke( null, $changed_at );
 check(
-	$earlier === $GLOBALS['spacefast_scheduled'][ Spacefast_Sync_State::HOOK ],
-	'new content pulls a far-future retry forward'
+	$changed_at + MINUTE_IN_SECONDS === $GLOBALS['spacefast_scheduled'][ Spacefast_Sync_State::HOOK ],
+	'public content waits for a 60-second quiet window'
+);
+$later_change = $changed_at + 20;
+$debounce->invoke( null, $later_change );
+check(
+	$later_change + MINUTE_IN_SECONDS === $GLOBALS['spacefast_scheduled'][ Spacefast_Sync_State::HOOK ],
+	'a later content change restarts the quiet window'
 );
 
 Spacefast_Sync_State::save(
