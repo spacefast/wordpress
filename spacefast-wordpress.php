@@ -3,7 +3,7 @@
  * Plugin Name: Spacefast
  * Plugin URI: https://spacefast.com/
  * Description: Publishes static WordPress exports or rebuilds a headless Spacefast site.
- * Version: 0.5.4
+ * Version: 0.5.5
  * Update URI: https://github.com/spacefast/wordpress
  * Requires at least: 6.5
  * Requires PHP: 8.1
@@ -14,7 +14,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'SPACEFAST_WORDPRESS_VERSION', '0.5.4' );
+define( 'SPACEFAST_WORDPRESS_VERSION', '0.5.5' );
 define( 'SPACEFAST_WORDPRESS_FILE', __FILE__ );
 
 require_once __DIR__ . '/includes/class-spacefast-settings.php';

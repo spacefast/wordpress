@@ -270,7 +270,7 @@ final class Spacefast_Client {
 	}
 
 	/**
-	 * @param array<int,array{path:string,size:int,sha256:string}> $files Files.
+	 * @param array<int,array{path:string,size:int,sha256:string,contentType:string}> $files Files.
 	 * @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>}
 	 */
 	public function create_static_version( array $files, string $event_id, string $publish_mode ): array {
@@ -350,6 +350,12 @@ final class Spacefast_Client {
 		return $this->curl_upload( $url, $method, $headers, $file_path );
 	}
 
+	public static function content_type_for_file( string $file_path ): string {
+		$filetype = wp_check_filetype( $file_path );
+		$type = is_array( $filetype ) ? (string) ( $filetype['type'] ?? '' ) : '';
+		return '' !== $type ? $type : 'application/octet-stream';
+	}
+
 	/**
 	 * @param mixed $response Upload transport response.
 	 * @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>}
@@ -401,12 +407,17 @@ final class Spacefast_Client {
 			return self::upload_error( false, 'export_file_missing', 'A generated export file is no longer readable.' );
 		}
 		$curl_headers = array();
+		$has_content_type = false;
 		foreach ( $headers as $name => $value ) {
 			if ( preg_match( '/[\r\n]/', (string) $name . (string) $value ) ) {
 				fclose( $stream );
 				return self::upload_error( false, 'invalid_upload_target', 'Spacefast returned invalid upload headers.' );
 			}
+			if ( 'content-type' === strtolower( (string) $name ) ) $has_content_type = true;
 			$curl_headers[] = (string) $name . ': ' . (string) $value;
+		}
+		if ( ! $has_content_type ) {
+			$curl_headers[] = 'Content-Type: ' . self::content_type_for_file( $file_path );
 		}
 		$curl_headers[] = 'Content-Length: ' . $size;
 		$handle = curl_init( $url );
