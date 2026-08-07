@@ -202,8 +202,11 @@ final class Spacefast_Sync_State {
 				maybe_serialize( $expected )
 			)
 		);
+		// Raw SQL bypasses WordPress's option-cache maintenance. A failed CAS
+		// means another request changed the row, so the next retry must reload
+		// that newer value instead of comparing the same stale cached value.
+		wp_cache_delete( $option, 'options' );
 		if ( 1 === $updated ) {
-			wp_cache_delete( $option, 'options' );
 			return true;
 		}
 		return false;
