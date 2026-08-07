@@ -18,6 +18,16 @@ final class Spacefast_Client {
 	 */
 	private function request( string $method, string $path, ?array $body = null, array $headers = array() ): array {
 		$settings = Spacefast_Settings::get();
+		$access_token = ( new Spacefast_OAuth( $this->transport ) )->access_token();
+		if ( '' === $access_token ) {
+			return array(
+				'ok' => false,
+				'retryable' => false,
+				'code' => 'reauthorization_required',
+				'message' => 'Reconnect Spacefast to continue.',
+				'data' => array(),
+			);
+		}
 		$args = array(
 			'method' => $method,
 			'timeout' => 10,
@@ -27,7 +37,7 @@ final class Spacefast_Client {
 			'limit_response_size' => 65536,
 			'headers' => array_merge(
 				array(
-					'Authorization' => 'Bearer ' . $settings['token'],
+					'Authorization' => 'Bearer ' . $access_token,
 					'Accept' => 'application/json',
 					'User-Agent' => 'Spacefast-WordPress/' . SPACEFAST_WORDPRESS_VERSION,
 				),
@@ -81,6 +91,16 @@ final class Spacefast_Client {
 				: (string) ( $decoded['detail'] ?? 'Spacefast rejected the request.' ),
 			'data' => array(),
 		);
+	}
+
+	/** @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>} */
+	public function list_teams(): array {
+		return $this->request( 'GET', '/v1/teams?limit=100' );
+	}
+
+	/** @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>} */
+	public function list_spaces(): array {
+		return $this->request( 'GET', '/v1/spaces?limit=100' );
 	}
 
 	/**

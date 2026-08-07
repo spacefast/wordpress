@@ -21,6 +21,8 @@ final class Spacefast_Sync_State {
 			'last_message' => '',
 			'last_build_id' => '',
 			'last_version_id' => '',
+			'last_attempt_at' => 0,
+			'last_success_at' => 0,
 		);
 	}
 
@@ -71,6 +73,7 @@ final class Spacefast_Sync_State {
 		$state['last_status'] = (int) $state['desired'] > $generation ? 'pending' : 'delivered';
 		$state['last_message'] = '';
 		$state['last_build_id'] = $build_id;
+		$state['last_success_at'] = time();
 		return $state;
 	}
 
@@ -86,6 +89,7 @@ final class Spacefast_Sync_State {
 		$state['last_status'] = $status;
 		$state['last_message'] = '';
 		$state['last_version_id'] = $version_id;
+		$state['last_success_at'] = time();
 		return $state;
 	}
 

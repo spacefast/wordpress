@@ -18,3 +18,5 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes php-cli zip unzip
       - name: Test
         run: ./bin/test.sh
+      - name: WordPress acceptance
+        run: ./bin/test-wordpress.sh

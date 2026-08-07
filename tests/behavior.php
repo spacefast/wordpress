@@ -4,6 +4,7 @@ declare( strict_types=1 );
 
 define( 'ABSPATH', __DIR__ . '/' );
 define( 'DAY_IN_SECONDS', 86400 );
+define( 'MINUTE_IN_SECONDS', 60 );
 define( 'SPACEFAST_WORDPRESS_VERSION', '0.1.0-test' );
 
 $GLOBALS['spacefast_options'] = array();
@@ -77,6 +78,15 @@ function get_post_type_object( string $post_type ) {
 function wp_generate_uuid4(): string {
 	return '00000000-0000-4000-8000-000000000001';
 }
+function wp_generate_password( int $length ): string {
+	return str_repeat( 'a', $length );
+}
+function admin_url( string $path = '' ): string {
+	return 'https://wp.example.test/wp-admin/' . ltrim( $path, '/' );
+}
+function add_query_arg( array $args, string $url ): string {
+	return $url . ( str_contains( $url, '?' ) ? '&' : '?' ) . http_build_query( $args, '', '&', PHP_QUERY_RFC3986 );
+}
 function home_url(): string {
 	return 'https://wp.example.test';
 }
@@ -127,6 +137,7 @@ $wpdb = new Spacefast_Test_Wpdb();
 
 require_once dirname( __DIR__ ) . '/includes/class-spacefast-sync-state.php';
 require_once dirname( __DIR__ ) . '/includes/class-spacefast-settings.php';
+require_once dirname( __DIR__ ) . '/includes/class-spacefast-oauth.php';
 require_once dirname( __DIR__ ) . '/includes/class-spacefast-client.php';
 require_once dirname( __DIR__ ) . '/includes/class-spacefast-static-publisher.php';
 require_once dirname( __DIR__ ) . '/includes/class-spacefast-plugin.php';
@@ -144,27 +155,119 @@ function response( int $status, array $data = array() ): array {
 	);
 }
 
-$connection = Spacefast_Settings::parse_connection(
-	'{"apiUrl":"https://api.spacefast.com/","spaceId":"spc_demo","token":"sfa_secret"}'
+function raw_response( int $status, array $data = array() ): array {
+	return array(
+		'response' => array( 'code' => $status ),
+		'body' => json_encode( $data ),
+	);
+}
+
+check(
+	array( 'teams:read', 'spaces:read', 'spaces:publish', 'offline_access' ) === Spacefast_OAuth::scopes( Spacefast_Settings::MODE_STATIC ),
+	'static OAuth asks only for Team discovery, Space discovery, publishing, and refresh access'
 );
-check( 'https://api.spacefast.com' === $connection['api_url'], 'normalizes API origin' );
-check( 'spc_demo' === $connection['space_id'], 'keeps exact space id' );
-try {
-	Spacefast_Settings::parse_connection(
-		'{"apiUrl":"http://api.spacefast.com","spaceId":"spc_demo","token":"sfa_secret"}'
+check(
+	array( 'teams:read', 'spaces:read', 'builds:trigger', 'offline_access' ) === Spacefast_OAuth::scopes( Spacefast_Settings::MODE_HEADLESS ),
+	'headless OAuth asks only for Team discovery, Space discovery, builds, and refresh access'
+);
+check(
+	strlen( Spacefast_OAuth::pkce_challenge( str_repeat( 'v', 64 ) ) ) === 43,
+	'PKCE challenge uses an unpadded SHA-256 base64url value'
+);
+
+$oauth_requests = array();
+$oauth_transport = static function ( string $url, array $args ) use ( &$oauth_requests ): array {
+	$oauth_requests[] = array( $url, $args );
+	if ( str_ends_with( $url, '/oauth2/register' ) ) {
+		return raw_response( 201, array( 'client_id' => 'client_wordpress' ) );
+	}
+	if ( str_ends_with( $url, '/oauth2/token' ) ) {
+		return raw_response(
+			200,
+			array(
+				'access_token' => 'oauth_access',
+				'refresh_token' => 'oauth_refresh',
+				'expires_in' => 900,
+				'scope' => 'teams:read spaces:read builds:trigger offline_access',
+			)
+		);
+	}
+	if ( str_contains( $url, '/v1/teams' ) ) {
+		return response( 200, array( array( 'id' => 'team_demo', 'name' => 'Demo Team', 'slug' => 'demo-team' ) ) );
+	}
+	return response(
+		200,
+		array(
+			array(
+				'id' => 'spc_demo',
+				'teamId' => 'team_demo',
+				'teamSlug' => 'demo-team',
+				'slug' => 'demo-space',
+				'title' => 'Demo Space',
+				'liveUrl' => 'https://demo.spacefast.site',
+			),
+		)
 	);
-	throw new RuntimeException( 'insecure API origin accepted' );
-} catch ( InvalidArgumentException $expected ) {
-	check( true, 'insecure API origin rejected' );
-}
-try {
-	Spacefast_Settings::parse_connection(
-		'{"apiUrl":"https://attacker.example","spaceId":"spc_demo","token":"sfa_secret"}'
-	);
-	throw new RuntimeException( 'arbitrary API origin accepted' );
-} catch ( InvalidArgumentException $expected ) {
-	check( true, 'arbitrary API origin rejected' );
-}
+};
+$oauth = new Spacefast_OAuth( $oauth_transport );
+$authorization = $oauth->begin( Spacefast_Settings::MODE_HEADLESS );
+check( true === $authorization['ok'], 'dynamic client registration starts OAuth' );
+$registration_body = json_decode( $oauth_requests[0][1]['body'], true );
+check( 'none' === $registration_body['token_endpoint_auth_method'], 'registers a public PKCE client' );
+check(
+	array( Spacefast_Settings::api_url() . '/v1' ) === $registration_body['resources'],
+	'binds tokens to the Spacefast API resource'
+);
+check( str_contains( (string) $authorization['url'], 'code_challenge_method=S256' ), 'authorization uses PKCE S256' );
+$pending = get_option( Spacefast_OAuth::PENDING_OPTION );
+$finished = $oauth->finish( 'authorization-code', (string) $pending['state'] );
+check( true === $finished['ok'], 'valid callback exchanges its code and loads Team-scoped choices' );
+check( 'oauth_refresh' === Spacefast_Settings::get()['refresh_token'], 'stores the rotating refresh token' );
+check( 1 === count( get_option( Spacefast_OAuth::CHOICES_OPTION )['spaces'] ), 'returns Space choices to WordPress' );
+check( ! Spacefast_Settings::configured(), 'authorization alone is not presented as Connected' );
+
+Spacefast_Settings::merge( array( 'expires_at' => 1 ) );
+$refresh_requests = array();
+$refreshing_oauth = new Spacefast_OAuth(
+	static function ( string $url, array $args ) use ( &$refresh_requests ): array {
+		$refresh_requests[] = array( $url, $args );
+		return raw_response(
+			200,
+			array(
+				'access_token' => 'rotated_access',
+				'refresh_token' => 'rotated_refresh',
+				'expires_in' => 900,
+			)
+		);
+	}
+);
+check( 'rotated_access' === $refreshing_oauth->access_token(), 'refreshes before an access token expires' );
+check( 'rotated_refresh' === Spacefast_Settings::get()['refresh_token'], 'persists refresh-token rotation' );
+$revoke_requests = array();
+( new Spacefast_OAuth(
+	static function ( string $url, array $args ) use ( &$revoke_requests ): array {
+		$revoke_requests[] = array( $url, $args );
+		return raw_response( 200 );
+	}
+) )->revoke();
+check( 2 === count( $revoke_requests ), 'disconnect can revoke refresh and access tokens remotely' );
+
+$connection = array(
+	'mode' => Spacefast_Settings::MODE_HEADLESS,
+	'client_id' => 'client_wordpress',
+	'access_token' => 'access_secret',
+	'refresh_token' => 'refresh_secret',
+	'expires_at' => time() + 3600,
+	'scope' => 'teams:read spaces:read builds:trigger offline_access',
+	'team_id' => 'team_demo',
+	'team_name' => 'Demo Team',
+	'team_slug' => 'demo-team',
+	'space_id' => 'spc_demo',
+	'space_name' => 'Demo Space',
+	'space_slug' => 'demo-space',
+	'live_url' => 'https://demo.spacefast.site',
+	'verified_at' => time(),
+);
 
 $state = Spacefast_Sync_State::record_change(
 	Spacefast_Sync_State::defaults(),
@@ -257,7 +360,7 @@ check(
 );
 
 Spacefast_Settings::disconnect();
-Spacefast_Settings::save( $connection );
+Spacefast_Settings::merge( $connection );
 $reconnected = Spacefast_Sync_State::mutate(
 	static fn( array $current ): array => Spacefast_Sync_State::record_change(
 		$current,
@@ -289,7 +392,7 @@ check(
 	'rebuilds after deleting a public REST-visible post'
 );
 
-Spacefast_Settings::save( $connection );
+Spacefast_Settings::merge( $connection );
 $requests = array();
 $transport = static function ( string $url, array $args ) use ( &$requests ) {
 	$requests[] = array( $url, $args );
@@ -316,8 +419,8 @@ check(
 	'uses the constrained server-side trigger'
 );
 check(
-	'Bearer sfa_secret' === $build_request['headers']['Authorization'],
-	'authenticates with the exact scoped secret'
+	'Bearer access_secret' === $build_request['headers']['Authorization'],
+	'authenticates with the current OAuth access token'
 );
 
 $mismatch = new Spacefast_Client(
@@ -358,7 +461,13 @@ $invalid_receipt_result = $invalid_receipt->trigger_build( 'wp-event-invalid' );
 check( false === $invalid_receipt_result['ok'], 'rejects an empty success response' );
 check( true === $invalid_receipt_result['retryable'], 'retries invalid build receipts' );
 
-Spacefast_Settings::save_mode( Spacefast_Settings::MODE_STATIC );
+Spacefast_Settings::merge(
+	array(
+		'mode' => Spacefast_Settings::MODE_STATIC,
+		'scope' => 'teams:read spaces:read spaces:publish offline_access',
+		'verified_at' => time(),
+	)
+);
 check( 'static' === Spacefast_Settings::mode(), 'stores the selected static publishing mode' );
 check(
 	array( 'setup', 'fetch_urls', 'spacefast_publish', 'wrapup' ) === Spacefast_Plugin::simply_static_tasks(

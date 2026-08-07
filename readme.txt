@@ -3,7 +3,7 @@ Contributors: spacefast
 Tags: static site, headless cms, simply static, deployment
 Requires at least: 6.5
 Requires PHP: 8.1
-Stable tag: 0.2.0
+Stable tag: 0.3.0
 License: GPLv2 or later
 
 Publish a Simply Static export to Spacefast, or rebuild a headless site when WordPress content changes.
@@ -19,17 +19,22 @@ Both modes include a manual action in Settings > Spacefast. Headless repository 
 
 == Installation ==
 
-1. In Spacefast, configure the WordPress connection for the Space.
-2. Download and activate this plugin.
-3. Open Settings > Spacefast and paste the one-time connection.
-4. Choose Static WordPress or Headless CMS and test the connection.
-5. For Static WordPress, install and activate the free Simply Static plugin.
+1. Download and activate this plugin.
+2. Open Settings > Spacefast and choose Static WordPress or Headless CMS.
+3. Continue to Spacefast, sign in, and authorize one Team.
+4. Back in WordPress, choose the Space to publish or rebuild.
+5. For Static WordPress, use the provided link to install or activate Simply Static.
 
 == Security ==
 
-The connection key is limited to one Space. It can publish versions, read version status, and trigger the connected production repository. It cannot change Space settings or access another Space. Secrets are stored in a non-autoloaded option and are never shown again.
+OAuth access is limited to the Team you authorize and the mode you choose. WordPress then verifies the selected Space before showing Connected. Tokens are stored in non-autoloaded options and are never displayed.
 
 == Changelog ==
+
+= 0.3.0 =
+* Replace copied API keys with Team-scoped OAuth 2 authorization and Space selection in WordPress.
+* Add refresh-token rotation and remote revocation on disconnect.
+* Add one-click Simply Static setup, human delivery states, WP-Cron health, and deletion-safe static publishing.
 
 = 0.2.0 =
 * Add direct Simply Static export publishing.
