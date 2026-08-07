@@ -4,6 +4,7 @@ defined( 'ABSPATH' ) || exit;
 
 final class Spacefast_Plugin {
 	const AUTOMATIC_DEBOUNCE_SECONDS = MINUTE_IN_SECONDS;
+	const STATIC_DELIVERY_STALE_SECONDS = 2 * HOUR_IN_SECONDS;
 	const LOCK_OPTION = 'spacefast_wordpress_worker_lock';
 	const NOTICE_TRANSIENT = 'spacefast_wordpress_admin_notice';
 
@@ -42,6 +43,7 @@ final class Spacefast_Plugin {
 		add_action( 'update_option_blogname', array( __CLASS__, 'wordpress_setting_changed' ), 10, 3 );
 		add_action( 'update_option_blogdescription', array( __CLASS__, 'wordpress_setting_changed' ), 10, 3 );
 		add_action( 'update_option_blog_public', array( __CLASS__, 'wordpress_setting_changed' ), 10, 3 );
+		add_action( 'update_option_home', array( __CLASS__, 'wordpress_setting_changed' ), 10, 3 );
 		add_filter( 'site_status_tests', array( __CLASS__, 'site_health_tests' ) );
 	}
 
@@ -55,7 +57,12 @@ final class Spacefast_Plugin {
 			add_option( Spacefast_Sync_State::OPTION, Spacefast_Sync_State::defaults(), '', false );
 		}
 		$state = Spacefast_Sync_State::get();
-		if ( (int) $state['desired'] > (int) $state['delivered'] ) {
+		$active_delivery = 'building' === (string) $state['last_status']
+			&& '' !== (string) $state['last_build_id'];
+		$active_export = self::static_delivery_active( $state );
+		if ( $active_delivery || $active_export ) {
+			self::schedule( time() + 1 );
+		} elseif ( (int) $state['desired'] > (int) $state['delivered'] ) {
 			self::schedule_after_change( (int) $state['last_change_at'] );
 		}
 	}
@@ -259,6 +266,13 @@ final class Spacefast_Plugin {
 	 * @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>}
 	 */
 	private static function connect_space( array $space, array $team ): array {
+		$current_settings = Spacefast_Settings::get();
+		if ( ! hash_equals( (string) $current_settings['space_id'], (string) $space['id'] ) ) {
+			wp_clear_scheduled_hook( Spacefast_Sync_State::HOOK );
+			Spacefast_Sync_State::save( Spacefast_Sync_State::defaults() );
+			Spacefast_Static_Publisher::reset();
+			self::$change_recorded = false;
+		}
 		Spacefast_Settings::merge(
 			array(
 				'team_id' => (string) ( $space['teamId'] ?? $team['id'] ?? '' ),
@@ -273,7 +287,7 @@ final class Spacefast_Plugin {
 		);
 		self::mark_settings_pending();
 		$settings_sync = self::sync_space_settings();
-		if ( ! $settings_sync['ok'] ) {
+		if ( ! $settings_sync['ok'] && 'reauthorization_required' !== $settings_sync['code'] ) {
 			self::static_publish_failed( $settings_sync['message'] );
 			return $settings_sync;
 		}
@@ -370,16 +384,24 @@ final class Spacefast_Plugin {
 			self::notice( 'error', __( 'Install and activate Simply Static before publishing.', 'spacefast-wordpress' ) );
 			self::redirect();
 		}
+		$before = Spacefast_Sync_State::get();
+		$was_active = self::static_delivery_active( $before );
+		$previous_attempt = (int) $before['last_attempt_at'];
 		self::record_change( 'manual', true );
 		wp_clear_scheduled_hook( Spacefast_Sync_State::HOOK );
 		self::deliver();
 		$state = Spacefast_Sync_State::get();
-		$active = in_array( (string) $state['last_status'], array( 'exporting', 'uploading', 'finalizing' ), true );
+		$active = self::static_delivery_active( $state );
+		$started = $active && ( ! $was_active || (int) $state['last_attempt_at'] > $previous_attempt );
+		$message = $started
+			? __( 'Publishing started. You can leave this page.', 'spacefast-wordpress' )
+			: ( $active
+				? __( 'A publish is already running. Your latest changes will publish next.', 'spacefast-wordpress' )
+				: ( (string) $state['last_message'] ?: __( 'The publish could not start. The current live version is safe.', 'spacefast-wordpress' ) )
+			);
 		self::notice(
 			$active ? 'success' : 'error',
-			$active
-				? __( 'Publishing started. You can leave this page.', 'spacefast-wordpress' )
-				: ( (string) $state['last_message'] ?: __( 'The publish could not start. The current live version is safe.', 'spacefast-wordpress' ) )
+			$message
 		);
 		self::redirect();
 	}
@@ -641,7 +663,7 @@ final class Spacefast_Plugin {
 
 		try {
 			$snapshot = Spacefast_Sync_State::get();
-			if ( ! empty( $snapshot['settings_pending'] ) ) {
+			if ( ! empty( $snapshot['settings_pending'] ) && Spacefast_OAuth::has_scope( 'spaces:write' ) ) {
 				$settings_sync = self::sync_space_settings();
 				if ( ! $settings_sync['ok'] ) {
 					Spacefast_Sync_State::mutate(
@@ -726,6 +748,10 @@ final class Spacefast_Plugin {
 			self::schedule( time() + 15 );
 			return;
 		}
+		if ( ! in_array( $status, array( 'succeeded', 'failed', 'canceled', 'skipped' ), true ) ) {
+			self::schedule( time() + 60 );
+			return;
+		}
 		$diagnostics = isset( $build['diagnostics'] ) && is_array( $build['diagnostics'] ) ? $build['diagnostics'] : array();
 		$message = '';
 		foreach ( $diagnostics as $diagnostic ) {
@@ -739,15 +765,29 @@ final class Spacefast_Plugin {
 		);
 		if ( 'succeeded' === $status ) {
 			Spacefast_Settings::merge( array( 'verified_at' => time() ) );
-			if ( (int) $current['desired'] > (int) $current['delivered'] ) {
-				self::schedule_after_change( (int) $current['last_change_at'] );
-			}
+		}
+		if ( (int) $current['desired'] > (int) $current['delivered'] ) {
+			self::schedule_after_change( (int) $current['last_change_at'] );
 		}
 	}
 
 	/** @param array<string,mixed> $snapshot Current delivery state. */
 	private static function deliver_static( array $snapshot ): void {
-		if ( in_array( (string) $snapshot['last_status'], array( 'exporting', 'uploading', 'finalizing' ), true ) ) return;
+		if ( self::static_delivery_active( $snapshot ) ) {
+			if ( ! self::static_delivery_stale( $snapshot ) ) {
+				self::schedule( max( time() + 60, (int) $snapshot['last_attempt_at'] + self::STATIC_DELIVERY_STALE_SECONDS ) );
+				return;
+			}
+			Spacefast_Static_Publisher::reset();
+			$snapshot = Spacefast_Sync_State::mutate(
+				static function ( array $state ): array {
+					$state['last_status'] = 'pending';
+					$state['last_message'] = '';
+					$state['active_generation'] = 0;
+					return $state;
+				}
+			);
+		}
 		if ( (int) $snapshot['desired'] <= (int) $snapshot['delivered'] ) return;
 		if ( ! self::simply_static_available() ) {
 			self::static_publish_failed( __( 'Simply Static is required. Install it, then retry; the current live version is safe.', 'spacefast-wordpress' ) );
@@ -755,6 +795,12 @@ final class Spacefast_Plugin {
 		}
 		self::configure_simply_static();
 		try {
+			Spacefast_Sync_State::mutate(
+				static function ( array $state ): array {
+					$state['last_attempt_at'] = time();
+					return $state;
+				}
+			);
 			$started = \Simply_Static\Plugin::instance()->run_static_export();
 			if ( ! $started ) {
 				self::schedule( time() + 60 );
@@ -764,12 +810,24 @@ final class Spacefast_Plugin {
 				static function ( array $state ): array {
 					$state['last_status'] = 'exporting';
 					$state['last_message'] = '';
+					$state['last_attempt_at'] = time();
 					return $state;
 				}
 			);
 		} catch ( Throwable $error ) {
 			self::static_publish_failed( $error->getMessage() );
 		}
+	}
+
+	/** @param array<string,mixed> $state Current delivery state. */
+	private static function static_delivery_active( array $state ): bool {
+		return in_array( (string) $state['last_status'], array( 'exporting', 'uploading', 'finalizing' ), true );
+	}
+
+	/** @param array<string,mixed> $state Current delivery state. */
+	private static function static_delivery_stale( array $state ): bool {
+		$last_attempt = (int) $state['last_attempt_at'];
+		return 0 === $last_attempt || $last_attempt + self::STATIC_DELIVERY_STALE_SECONDS <= time();
 	}
 
 	public static function register_simply_static(): void {
@@ -845,7 +903,19 @@ final class Spacefast_Plugin {
 				);
 				$next['last_status'] = 'exporting';
 				$next['active_generation'] = (int) $next['desired'];
+				$next['last_attempt_at'] = time();
 				return $next;
+			}
+		);
+	}
+
+	public static function static_publish_progress( string $status ): void {
+		if ( ! in_array( $status, array( 'uploading', 'finalizing' ), true ) ) return;
+		Spacefast_Sync_State::mutate(
+			static function ( array $state ) use ( $status ): array {
+				$state['last_status'] = $status;
+				$state['last_attempt_at'] = time();
+				return $state;
 			}
 		);
 	}
@@ -869,6 +939,7 @@ final class Spacefast_Plugin {
 			static function ( array $state ) use ( $message ): array {
 				$state['last_status'] = 'blocked';
 				$state['last_message'] = $message;
+				$state['active_generation'] = 0;
 				return $state;
 			}
 		);

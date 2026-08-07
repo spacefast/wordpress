@@ -34,7 +34,7 @@ final class Spacefast_Client {
 			'redirection' => 0,
 			'reject_unsafe_urls' => true,
 			'sslverify' => true,
-			'limit_response_size' => 65536,
+			'limit_response_size' => 1024 * 1024,
 			'headers' => array_merge(
 				array(
 					'Authorization' => 'Bearer ' . $access_token,
@@ -61,7 +61,21 @@ final class Spacefast_Client {
 		}
 
 		$status = (int) wp_remote_retrieve_response_code( $response );
-		$decoded = json_decode( (string) wp_remote_retrieve_body( $response ), true );
+		$raw_body = (string) wp_remote_retrieve_body( $response );
+		$decoded = json_decode( $raw_body, true );
+		if (
+			$status >= 200
+			&& $status < 300
+			&& ( '' === $raw_body || JSON_ERROR_NONE !== json_last_error() || ! is_array( $decoded ) )
+		) {
+			return array(
+				'ok' => false,
+				'retryable' => true,
+				'code' => 'invalid_response_body',
+				'message' => 'Spacefast returned an unreadable response.',
+				'data' => array(),
+			);
+		}
 		$decoded = is_array( $decoded ) ? $decoded : array();
 		if ( $status >= 200 && $status < 300 ) {
 			$data = isset( $decoded['data'] ) && is_array( $decoded['data'] )

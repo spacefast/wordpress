@@ -7,7 +7,7 @@ final class Spacefast_Sync_State {
 	const HOOK = 'spacefast_wordpress_deliver';
 
 	/**
-	 * @return array{desired:int,delivered:int,event_id:string,reasons:array<int,string>,attempts:int,next_at:int,last_status:string,last_message:string,last_build_id:string,last_version_id:string,last_change_at:int}
+	 * @return array{desired:int,delivered:int,event_id:string,reasons:array<int,string>,attempts:int,next_at:int,last_status:string,last_message:string,last_build_id:string,last_version_id:string,last_change_at:int,last_attempt_at:int,last_success_at:int,last_settings_sync_at:int,active_generation:int,settings_pending:bool}
 	 */
 	public static function defaults(): array {
 		return array(
@@ -31,7 +31,7 @@ final class Spacefast_Sync_State {
 	}
 
 	/**
-	 * @return array{desired:int,delivered:int,event_id:string,reasons:array<int,string>,attempts:int,next_at:int,last_status:string,last_message:string,last_build_id:string,last_version_id:string,last_change_at:int}
+	 * @return array{desired:int,delivered:int,event_id:string,reasons:array<int,string>,attempts:int,next_at:int,last_status:string,last_message:string,last_build_id:string,last_version_id:string,last_change_at:int,last_attempt_at:int,last_success_at:int,last_settings_sync_at:int,active_generation:int,settings_pending:bool}
 	 */
 	public static function get(): array {
 		$value = get_option( self::OPTION, array() );
@@ -91,9 +91,11 @@ final class Spacefast_Sync_State {
 			$state['last_status'] = (int) $state['desired'] > (int) $state['delivered'] ? 'pending' : 'live';
 			$state['last_message'] = '';
 			$state['last_success_at'] = time();
+			$state['last_build_id'] = '';
 			return $state;
 		}
 		$state['last_status'] = 'blocked';
+		$state['last_build_id'] = '';
 		$state['last_message'] = '' !== $message
 			? $message
 			: 'The build did not finish successfully. The previous live version is safe.';
@@ -114,7 +116,10 @@ final class Spacefast_Sync_State {
 	 */
 	public static function acknowledge_static( array $state, string $version_id, string $status ): array {
 		$state = array_merge( self::defaults(), $state );
-		$state['delivered'] = max( (int) $state['delivered'], (int) $state['active_generation'] );
+		$generation = 0 < (int) $state['active_generation']
+			? (int) $state['active_generation']
+			: (int) $state['desired'];
+		$state['delivered'] = max( (int) $state['delivered'], $generation );
 		$state['attempts'] = 0;
 		$state['next_at'] = 0;
 		$state['last_status'] = (int) $state['desired'] > (int) $state['delivered'] ? 'pending' : $status;
