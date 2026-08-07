@@ -1,0 +1,10 @@
+<?php
+
+defined( 'WP_UNINSTALL_PLUGIN' ) || exit;
+
+wp_clear_scheduled_hook( 'spacefast_wordpress_deliver' );
+delete_option( 'spacefast_wordpress_settings' );
+delete_option( 'spacefast_wordpress_sync_state' );
+delete_option( 'spacefast_wordpress_worker_lock' );
+delete_option( 'spacefast_wordpress_publish_state' );
+delete_transient( 'spacefast_wordpress_admin_notice' );
