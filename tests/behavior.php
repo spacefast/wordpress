@@ -161,6 +161,9 @@ final class Spacefast_Test_Wpdb {
 			if ( maybe_serialize( $current ) !== $expected ) {
 				return 0;
 			}
+			if ( $next === $expected ) {
+				return 0;
+			}
 			$GLOBALS['spacefast_options'][ $option ] = unserialize( $next );
 			return 1;
 		}
@@ -518,6 +521,8 @@ check( 'event-two' === $cas_ack['event_id'], 'CAS preserves the successor event 
 check( 'building' === $cas_ack['last_status'], 'CAS keeps the accepted build active while preserving its successor' );
 unset( $GLOBALS['spacefast_cache_enabled'][ Spacefast_Sync_State::OPTION ] );
 unset( $GLOBALS['spacefast_cached_options'][ Spacefast_Sync_State::OPTION ] );
+$unchanged_state = Spacefast_Sync_State::mutate( static fn( array $current ): array => $current );
+check( $cas_ack === $unchanged_state, 'an unchanged journal transition succeeds without becoming a false CAS conflict' );
 
 $invalid_response = new Spacefast_Client(
 	static fn(): array => array(
