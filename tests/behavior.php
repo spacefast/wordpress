@@ -9,6 +9,8 @@ define( 'MINUTE_IN_SECONDS', 60 );
 define( 'SPACEFAST_WORDPRESS_VERSION', '0.1.0-test' );
 
 $GLOBALS['spacefast_options'] = array();
+$GLOBALS['spacefast_cached_options'] = array();
+$GLOBALS['spacefast_cache_enabled'] = array();
 $GLOBALS['spacefast_scheduled'] = array();
 $GLOBALS['spacefast_before_query'] = null;
 $GLOBALS['spacefast_post_types'] = array();
@@ -50,6 +52,14 @@ function sanitize_key( string $value ): string {
 	return preg_replace( '/[^a-z0-9_\\-]/', '', strtolower( $value ) ) ?? '';
 }
 function get_option( string $name, $default = false ) {
+	if ( ! empty( $GLOBALS['spacefast_cache_enabled'][ $name ] ) ) {
+		if ( array_key_exists( $name, $GLOBALS['spacefast_cached_options'] ) ) {
+			return $GLOBALS['spacefast_cached_options'][ $name ];
+		}
+		$value = $GLOBALS['spacefast_options'][ $name ] ?? $default;
+		$GLOBALS['spacefast_cached_options'][ $name ] = $value;
+		return $value;
+	}
 	return $GLOBALS['spacefast_options'][ $name ] ?? $default;
 }
 function update_option( string $name, $value ): bool {
@@ -86,7 +96,9 @@ function wp_unschedule_event( int $timestamp, string $hook ): bool {
 function maybe_serialize( $value ): string {
 	return serialize( $value );
 }
-function wp_cache_delete(): void {}
+function wp_cache_delete( string $name ): void {
+	unset( $GLOBALS['spacefast_cached_options'][ $name ] );
+}
 function wp_json_encode( $value ): string {
 	return (string) json_encode( $value, JSON_UNESCAPED_SLASHES );
 }
@@ -486,11 +498,13 @@ Spacefast_Sync_State::save(
 	)
 );
 $GLOBALS['spacefast_before_query'] = static function (): void {
-	$current = Spacefast_Sync_State::get();
+	$current = $GLOBALS['spacefast_options'][ Spacefast_Sync_State::OPTION ];
 	$current['desired'] = 2;
 	$current['event_id'] = 'event-two';
-	Spacefast_Sync_State::save( $current );
+	$GLOBALS['spacefast_options'][ Spacefast_Sync_State::OPTION ] = $current;
 };
+$GLOBALS['spacefast_cache_enabled'][ Spacefast_Sync_State::OPTION ] = true;
+$GLOBALS['spacefast_cached_options'][ Spacefast_Sync_State::OPTION ] = Spacefast_Sync_State::get();
 $cas_ack = Spacefast_Sync_State::mutate(
 	static fn( array $current ): array => Spacefast_Sync_State::acknowledge(
 		$current,
@@ -502,6 +516,8 @@ check( 2 === $cas_ack['desired'], 'CAS preserves a concurrent content generation
 check( 1 === $cas_ack['delivered'], 'CAS acknowledges only the delivered generation' );
 check( 'event-two' === $cas_ack['event_id'], 'CAS preserves the successor event id' );
 check( 'building' === $cas_ack['last_status'], 'CAS keeps the accepted build active while preserving its successor' );
+unset( $GLOBALS['spacefast_cache_enabled'][ Spacefast_Sync_State::OPTION ] );
+unset( $GLOBALS['spacefast_cached_options'][ Spacefast_Sync_State::OPTION ] );
 
 $invalid_response = new Spacefast_Client(
 	static fn(): array => array(
