@@ -351,6 +351,9 @@ final class Spacefast_Client {
 	}
 
 	public static function content_type_for_file( string $file_path ): string {
+		if ( 'jsonc' === strtolower( (string) pathinfo( $file_path, PATHINFO_EXTENSION ) ) ) {
+			return 'application/json';
+		}
 		$filetype = wp_check_filetype( $file_path );
 		$type = is_array( $filetype ) ? (string) ( $filetype['type'] ?? '' ) : '';
 		return '' !== $type ? $type : 'application/octet-stream';

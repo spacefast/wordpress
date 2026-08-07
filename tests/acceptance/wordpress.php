@@ -113,7 +113,7 @@ spacefast_accept(
 );
 
 $plugin = get_plugin_data( WP_PLUGIN_DIR . '/spacefast-wordpress/spacefast-wordpress.php', false, false );
-spacefast_accept( '0.5.5' === $plugin['Version'], 'Unexpected plugin version.' );
+spacefast_accept( '0.5.6' === $plugin['Version'], 'Unexpected plugin version.' );
 spacefast_accept( 'https://github.com/spacefast/wordpress' === $plugin['UpdateURI'], 'Update URI is missing.' );
 
 Spacefast_Settings::disconnect();
