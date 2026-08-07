@@ -19,7 +19,7 @@ final class Spacefast_OAuth {
 	public static function scopes( string $mode ): array {
 		return Spacefast_Settings::MODE_STATIC === $mode
 			? array( 'teams:read', 'spaces:read', 'spaces:write', 'spaces:publish', 'offline_access' )
-			: array( 'teams:read', 'spaces:read', 'builds:trigger', 'offline_access' );
+			: array( 'teams:read', 'spaces:read', 'spaces:write', 'builds:trigger', 'offline_access' );
 	}
 
 	public static function has_scope( string $scope ): bool {
@@ -73,6 +73,7 @@ final class Spacefast_OAuth {
 		$callback = self::callback_url();
 		$scopes = implode( ' ', self::scopes( $mode ) );
 		$resource = $api_url . self::RESOURCE_PATH;
+		$current = Spacefast_Settings::get();
 		$registration = $this->json_request(
 			'POST',
 			$api_url . '/v1/auth/oauth2/register',
@@ -101,6 +102,18 @@ final class Spacefast_OAuth {
 				'client_id' => $client_id,
 				'mode' => $mode,
 				'callback' => $callback,
+				'resume_connection' => Spacefast_Settings::configured() && $mode === $current['mode']
+					? array(
+						'team_id' => $current['team_id'],
+						'team_name' => $current['team_name'],
+						'team_slug' => $current['team_slug'],
+						'space_id' => $current['space_id'],
+						'space_name' => $current['space_name'],
+						'space_slug' => $current['space_slug'],
+						'live_url' => $current['live_url'],
+						'verified_at' => $current['verified_at'],
+					)
+					: null,
 				'expires_at' => time() + 10 * MINUTE_IN_SECONDS,
 			),
 			false
@@ -122,7 +135,7 @@ final class Spacefast_OAuth {
 		return array( 'ok' => true, 'message' => '', 'url' => $url );
 	}
 
-	/** @return array{ok:bool,message:string} */
+	/** @return array{ok:bool,message:string,resumed?:bool} */
 	public function finish( string $code, string $state ): array {
 		$pending = get_option( self::PENDING_OPTION, array() );
 		delete_option( self::PENDING_OPTION );
@@ -161,7 +174,27 @@ final class Spacefast_OAuth {
 				'team_id' => '', 'space_id' => '', 'verified_at' => 0,
 			)
 		);
-		return $this->load_choices();
+		$choices_result = $this->load_choices();
+		if ( ! $choices_result['ok'] ) return $choices_result;
+		$resume = isset( $pending['resume_connection'] ) && is_array( $pending['resume_connection'] )
+			? $pending['resume_connection']
+			: null;
+		$choices = get_option( self::CHOICES_OPTION, array() );
+		$spaces = is_array( $choices['spaces'] ?? null ) ? $choices['spaces'] : array();
+		$resume_space_id = is_array( $resume ) ? (string) ( $resume['space_id'] ?? '' ) : '';
+		$available = false;
+		foreach ( $spaces as $space ) {
+			if ( is_array( $space ) && '' !== $resume_space_id && hash_equals( (string) ( $space['id'] ?? '' ), $resume_space_id ) ) {
+				$available = true;
+				break;
+			}
+		}
+		if ( $available && is_array( $resume ) ) {
+			Spacefast_Settings::merge( $resume );
+			delete_option( self::CHOICES_OPTION );
+			return array( 'ok' => true, 'message' => '', 'resumed' => true );
+		}
+		return array( 'ok' => true, 'message' => '', 'resumed' => false );
 	}
 
 	/** @return array{ok:bool,message:string} */

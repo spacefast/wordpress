@@ -32,6 +32,11 @@ final class Spacefast_Settings {
 				'space_slug' => '',
 				'live_url' => '',
 				'verified_at' => 0,
+				'automatic_sync' => true,
+				'sync_title' => true,
+				'sync_visibility' => true,
+				'sync_source' => true,
+				'last_settings_sync_at' => 0,
 			),
 			$stored,
 			array( 'api_url' => self::api_url(), 'mode' => $mode )
@@ -86,6 +91,13 @@ final class Spacefast_Settings {
 			&& '' !== $value['team_id']
 			&& '' !== $value['space_id']
 			&& 0 < (int) $value['verified_at'];
+	}
+
+	public static function selected(): bool {
+		$value = self::get();
+		return self::authorized()
+			&& '' !== $value['team_id']
+			&& '' !== $value['space_id'];
 	}
 
 	public static function disconnect(): void {

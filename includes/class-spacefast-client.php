@@ -34,7 +34,7 @@ final class Spacefast_Client {
 			'redirection' => 0,
 			'reject_unsafe_urls' => true,
 			'sslverify' => true,
-			'limit_response_size' => 65536,
+			'limit_response_size' => 1024 * 1024,
 			'headers' => array_merge(
 				array(
 					'Authorization' => 'Bearer ' . $access_token,
@@ -61,7 +61,21 @@ final class Spacefast_Client {
 		}
 
 		$status = (int) wp_remote_retrieve_response_code( $response );
-		$decoded = json_decode( (string) wp_remote_retrieve_body( $response ), true );
+		$raw_body = (string) wp_remote_retrieve_body( $response );
+		$decoded = json_decode( $raw_body, true );
+		if (
+			$status >= 200
+			&& $status < 300
+			&& ( '' === $raw_body || JSON_ERROR_NONE !== json_last_error() || ! is_array( $decoded ) )
+		) {
+			return array(
+				'ok' => false,
+				'retryable' => true,
+				'code' => 'invalid_response_body',
+				'message' => 'Spacefast returned an unreadable response.',
+				'data' => array(),
+			);
+		}
 		$decoded = is_array( $decoded ) ? $decoded : array();
 		if ( $status >= 200 && $status < 300 ) {
 			$data = isset( $decoded['data'] ) && is_array( $decoded['data'] )
@@ -116,6 +130,25 @@ final class Spacefast_Client {
 				'title' => $title,
 			),
 			array( 'Idempotency-Key' => $idempotency_key )
+		);
+	}
+
+	/** @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>} */
+	public function get_space(): array {
+		$settings = Spacefast_Settings::get();
+		return $this->request( 'GET', '/v1/spaces/' . rawurlencode( (string) $settings['space_id'] ) );
+	}
+
+	/**
+	 * @param array<string,mixed> $body Space settings patch.
+	 * @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>}
+	 */
+	public function update_space( array $body ): array {
+		$settings = Spacefast_Settings::get();
+		return $this->request(
+			'PATCH',
+			'/v1/spaces/' . rawurlencode( (string) $settings['space_id'] ),
+			$body
 		);
 	}
 
@@ -219,6 +252,20 @@ final class Spacefast_Client {
 		return $result;
 	}
 
+	/** @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>} */
+	public function get_build( string $build_id ): array {
+		if ( ! preg_match( '/^bld_[A-Za-z0-9_-]+$/', $build_id ) ) {
+			return array(
+				'ok' => false,
+				'retryable' => false,
+				'code' => 'invalid_build_id',
+				'message' => 'Spacefast returned an invalid build receipt.',
+				'data' => array(),
+			);
+		}
+		return $this->request( 'GET', '/v1/builds/' . rawurlencode( $build_id ) );
+	}
+
 	/**
 	 * @param array<int,array{path:string,size:int,sha256:string}> $files Files.
 	 * @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>}
@@ -239,6 +286,7 @@ final class Spacefast_Client {
 					'metadata' => array(
 						'integration' => 'wordpress',
 						'exporter' => 'simply-static',
+						'siteUrl' => untrailingslashit( home_url() ),
 					),
 				),
 			),

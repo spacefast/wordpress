@@ -29,6 +29,7 @@ final class Spacefast_Simply_Static_Publish_Task extends \Simply_Static\Task {
 				$partial_export ? 'additive' : 'snapshot'
 			);
 			if ( ! $result['done'] ) {
+				Spacefast_Plugin::static_publish_progress( $result['status'] );
 				$this->save_status_message(
 					'finalizing' === $result['status']
 						? __( 'Spacefast is activating the uploaded version', 'spacefast-wordpress' )

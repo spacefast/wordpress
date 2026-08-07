@@ -4,6 +4,7 @@ declare( strict_types=1 );
 
 define( 'ABSPATH', __DIR__ . '/' );
 define( 'DAY_IN_SECONDS', 86400 );
+define( 'HOUR_IN_SECONDS', 3600 );
 define( 'MINUTE_IN_SECONDS', 60 );
 define( 'SPACEFAST_WORDPRESS_VERSION', '0.1.0-test' );
 
@@ -11,6 +12,8 @@ $GLOBALS['spacefast_options'] = array();
 $GLOBALS['spacefast_scheduled'] = array();
 $GLOBALS['spacefast_before_query'] = null;
 $GLOBALS['spacefast_post_types'] = array();
+$GLOBALS['spacefast_hooks'] = array();
+$GLOBALS['spacefast_remote_handler'] = null;
 
 final class WP_Post {
 	public string $post_type;
@@ -24,6 +27,21 @@ final class WP_Post {
 
 function untrailingslashit( string $value ): string {
 	return rtrim( $value, "/\\" );
+}
+function __( string $value ): string {
+	return $value;
+}
+function sanitize_text_field( string $value ): string {
+	return trim( strip_tags( $value ) );
+}
+function get_bloginfo( string $field ): string {
+	return 'description' === $field ? 'Demo description' : 'Demo WordPress';
+}
+function add_action( string $hook, $callback, int $priority = 10, int $accepted_args = 1 ): void {
+	$GLOBALS['spacefast_hooks'][ $hook ] = array( $callback, $priority, $accepted_args );
+}
+function add_filter( string $hook, $callback, int $priority = 10, int $accepted_args = 1 ): void {
+	$GLOBALS['spacefast_hooks'][ $hook ] = array( $callback, $priority, $accepted_args );
 }
 function wp_parse_url( string $value ) {
 	return parse_url( $value );
@@ -105,6 +123,10 @@ function wp_remote_retrieve_response_code( array $response ): int {
 function wp_remote_retrieve_body( array $response ): string {
 	return (string) $response['body'];
 }
+function wp_safe_remote_request( string $url, array $args ) {
+	$handler = $GLOBALS['spacefast_remote_handler'];
+	return is_callable( $handler ) ? $handler( $url, $args ) : new Spacefast_Test_Wp_Error();
+}
 
 final class Spacefast_Test_Wp_Error {}
 final class Spacefast_Test_Wpdb {
@@ -143,6 +165,7 @@ $wpdb = new Spacefast_Test_Wpdb();
 
 require_once dirname( __DIR__ ) . '/includes/class-spacefast-sync-state.php';
 require_once dirname( __DIR__ ) . '/includes/class-spacefast-settings.php';
+require_once dirname( __DIR__ ) . '/includes/class-spacefast-site-settings.php';
 require_once dirname( __DIR__ ) . '/includes/class-spacefast-oauth.php';
 require_once dirname( __DIR__ ) . '/includes/class-spacefast-client.php';
 require_once dirname( __DIR__ ) . '/includes/class-spacefast-static-publisher.php';
@@ -183,13 +206,16 @@ function raw_response( int $status, array $data = array() ): array {
 	);
 }
 
+Spacefast_Plugin::boot();
+check( isset( $GLOBALS['spacefast_hooks']['update_option_home'] ), 'changing the WordPress Site Address queues settings sync' );
+
 check(
 	array( 'teams:read', 'spaces:read', 'spaces:write', 'spaces:publish', 'offline_access' ) === Spacefast_OAuth::scopes( Spacefast_Settings::MODE_STATIC ),
 	'static OAuth asks for Team discovery, Space creation and discovery, publishing, and refresh access'
 );
 check(
-	array( 'teams:read', 'spaces:read', 'builds:trigger', 'offline_access' ) === Spacefast_OAuth::scopes( Spacefast_Settings::MODE_HEADLESS ),
-	'headless OAuth asks only for Team discovery, Space discovery, builds, and refresh access'
+	array( 'teams:read', 'spaces:read', 'spaces:write', 'builds:trigger', 'offline_access' ) === Spacefast_OAuth::scopes( Spacefast_Settings::MODE_HEADLESS ),
+	'headless OAuth can sync the WordPress source before triggering builds'
 );
 Spacefast_Settings::merge( array( 'scope' => 'teams:read spaces:read spaces:publish offline_access' ) );
 check( ! Spacefast_OAuth::has_scope( 'spaces:write' ), 'upgraded static authorization does not imply Space management access' );
@@ -213,7 +239,7 @@ $oauth_transport = static function ( string $url, array $args ) use ( &$oauth_re
 				'access_token' => 'oauth_access',
 				'refresh_token' => 'oauth_refresh',
 				'expires_in' => 900,
-				'scope' => 'teams:read spaces:read builds:trigger offline_access',
+				'scope' => 'teams:read spaces:read spaces:write builds:trigger offline_access',
 			)
 		);
 	}
@@ -350,7 +376,7 @@ $connection = array(
 	'access_token' => 'access_secret',
 	'refresh_token' => 'refresh_secret',
 	'expires_at' => time() + 3600,
-	'scope' => 'teams:read spaces:read builds:trigger offline_access',
+	'scope' => 'teams:read spaces:read spaces:write builds:trigger offline_access',
 	'team_id' => 'team_demo',
 	'team_name' => 'Demo Team',
 	'team_slug' => 'demo-team',
@@ -360,6 +386,66 @@ $connection = array(
 	'live_url' => 'https://demo.spacefast.site',
 	'verified_at' => time(),
 );
+Spacefast_Settings::merge( $connection );
+$resume_authorization = $oauth->begin( Spacefast_Settings::MODE_HEADLESS );
+check( true === $resume_authorization['ok'], 'connected installations can reauthorize in place' );
+$resume_pending = get_option( Spacefast_OAuth::PENDING_OPTION );
+$resumed = $oauth->finish( 'resume-code', (string) $resume_pending['state'] );
+check( true === ( $resumed['resumed'] ?? false ), 'reauthorization resumes the existing accessible Space' );
+check( 'spc_demo' === Spacefast_Settings::get()['space_id'], 'reauthorization does not force another Space selection' );
+
+Spacefast_Settings::merge(
+	array_merge(
+		$connection,
+		array( 'scope' => 'teams:read spaces:read builds:trigger offline_access' )
+	)
+);
+Spacefast_Sync_State::save(
+	array_merge(
+		Spacefast_Sync_State::defaults(),
+		array(
+			'desired' => 8,
+			'delivered' => 8,
+			'last_status' => 'building',
+			'last_build_id' => 'bld_previous_space',
+		)
+	)
+);
+$connection_requests = array();
+$GLOBALS['spacefast_remote_handler'] = static function ( string $url, array $args ) use ( &$connection_requests ): array {
+	$connection_requests[] = array( $url, $args );
+	if ( 'POST' === $args['method'] && str_ends_with( $url, '/builds/wordpress' ) ) {
+		return response( 201, array( 'build' => array( 'id' => 'bld_new_space', 'status' => 'queued' ) ) );
+	}
+	return response( 200, array( 'ready' => true ) );
+};
+$change_recorded = new ReflectionProperty( Spacefast_Plugin::class, 'change_recorded' );
+$change_recorded->setValue( null, false );
+$connect_space = new ReflectionMethod( Spacefast_Plugin::class, 'connect_space' );
+$connected_new_space = $connect_space->invoke(
+	null,
+	array(
+		'id' => 'spc_new',
+		'teamId' => 'team_demo',
+		'title' => 'New Space',
+		'slug' => 'new-space',
+		'liveUrl' => 'https://new.spacefast.site',
+	),
+	array( 'id' => 'team_demo', 'name' => 'Demo Team', 'slug' => 'demo-team' )
+);
+check( true === $connected_new_space['ok'], 'an upgraded token can select a Space before settings reauthorization' );
+$new_space_state = Spacefast_Sync_State::get();
+check( 'bld_new_space' === $new_space_state['last_build_id'], 'a new Space starts its own first build instead of polling the previous Space' );
+check( 1 === $new_space_state['desired'], 'switching Spaces resets the previous delivery generation' );
+check(
+	! str_contains( implode( ' ', array_column( $connection_requests, 0 ) ), 'bld_previous_space' ),
+	'switching Spaces discards the previous active build receipt'
+);
+check( true === $new_space_state['settings_pending'], 'settings remain queued until the upgraded token is reauthorized' );
+
+Spacefast_Settings::merge( $connection );
+$GLOBALS['spacefast_remote_handler'] = null;
+Spacefast_Sync_State::save( Spacefast_Sync_State::defaults() );
 
 $state = Spacefast_Sync_State::record_change(
 	Spacefast_Sync_State::defaults(),
@@ -374,7 +460,10 @@ check( 0 < $state['last_change_at'], 'records when the latest public content cha
 $state['desired'] = 3;
 $ack = Spacefast_Sync_State::acknowledge( $state, 2, 'bld_test' );
 check( 2 === $ack['delivered'], 'acknowledges only observed generation' );
-check( 'pending' === $ack['last_status'], 'preserves an edit arriving during delivery' );
+check( 'building' === $ack['last_status'], 'keeps the active build visible until it reaches a terminal state' );
+$terminal = Spacefast_Sync_State::acknowledge_build_terminal( $ack, 'succeeded' );
+check( 'pending' === $terminal['last_status'], 'queues one successor when an edit arrived during the build' );
+check( '' === $terminal['last_build_id'], 'terminal builds clear their active polling receipt' );
 check( 60 === Spacefast_Sync_State::retry_delay( 1 ), 'starts bounded backoff' );
 check( DAY_IN_SECONDS === Spacefast_Sync_State::retry_delay( 99 ), 'caps backoff' );
 
@@ -403,7 +492,90 @@ $cas_ack = Spacefast_Sync_State::mutate(
 check( 2 === $cas_ack['desired'], 'CAS preserves a concurrent content generation' );
 check( 1 === $cas_ack['delivered'], 'CAS acknowledges only the delivered generation' );
 check( 'event-two' === $cas_ack['event_id'], 'CAS preserves the successor event id' );
-check( 'pending' === $cas_ack['last_status'], 'CAS leaves the successor pending' );
+check( 'building' === $cas_ack['last_status'], 'CAS keeps the accepted build active while preserving its successor' );
+
+$invalid_response = new Spacefast_Client(
+	static fn(): array => array(
+		'response' => array( 'code' => 200 ),
+		'body' => '{"data":{"config":',
+	)
+);
+$invalid_space = $invalid_response->get_space();
+check( ! $invalid_space['ok'], 'a truncated successful Space response is never patched as empty config' );
+check( 'invalid_response_body' === $invalid_space['code'], 'truncated JSON has a stable retryable error' );
+
+$poll_build = new ReflectionMethod( Spacefast_Plugin::class, 'poll_headless_build' );
+$GLOBALS['spacefast_scheduled'] = array();
+$failed_build_state = array_merge(
+	Spacefast_Sync_State::defaults(),
+	array(
+		'desired' => 2,
+		'delivered' => 1,
+		'event_id' => 'event-successor',
+		'last_status' => 'building',
+		'last_build_id' => 'bld_failed',
+		'last_change_at' => time() - 120,
+	)
+);
+Spacefast_Sync_State::save( $failed_build_state );
+$GLOBALS['spacefast_remote_handler'] = static fn(): array => response(
+	200,
+	array( 'id' => 'bld_failed', 'status' => 'failed', 'diagnostics' => array() )
+);
+$poll_build->invoke( null, $failed_build_state );
+check( 'blocked' === Spacefast_Sync_State::get()['last_status'], 'a failed build keeps its safe failure state visible' );
+check( false !== wp_next_scheduled( Spacefast_Sync_State::HOOK ), 'a content change queued during a failed build schedules one successor' );
+
+$GLOBALS['spacefast_scheduled'] = array();
+$unknown_build_state = array_merge(
+	Spacefast_Sync_State::defaults(),
+	array(
+		'desired' => 1,
+		'delivered' => 1,
+		'last_status' => 'building',
+		'last_build_id' => 'bld_unknown',
+	)
+);
+Spacefast_Sync_State::save( $unknown_build_state );
+$GLOBALS['spacefast_remote_handler'] = static fn(): array => response(
+	200,
+	array( 'id' => 'bld_unknown', 'status' => 'observing' )
+);
+$poll_build->invoke( null, $unknown_build_state );
+check( 'building' === Spacefast_Sync_State::get()['last_status'], 'an unknown build status does not become a false failure' );
+check( false !== wp_next_scheduled( Spacefast_Sync_State::HOOK ), 'an unknown build status is polled again' );
+$GLOBALS['spacefast_remote_handler'] = null;
+
+$mapping = Spacefast_Site_Settings::patch(
+	array(
+		'title' => 'Old title',
+		'noindex' => false,
+		'settingsDigest' => str_repeat( 'a', 64 ),
+		'config' => array(
+			'cleanUrls' => true,
+			'dataSources' => array(
+				'catalog' => array( 'kind' => 'wordpress', 'url' => 'https://catalog.example.test' ),
+			),
+		),
+	),
+	array( 'sync_title' => true, 'sync_visibility' => true, 'sync_source' => true ),
+	array(
+		'title' => 'New WordPress title',
+		'description' => 'A synced description.',
+		'noindex' => true,
+		'source_url' => 'https://wp.example.test',
+	),
+	Spacefast_Settings::MODE_HEADLESS
+);
+check( true === $mapping['config']['cleanUrls'], 'settings sync preserves unrelated Space config' );
+check( isset( $mapping['config']['dataSources']['catalog'] ), 'settings sync preserves unrelated data sources' );
+check(
+	array( 'kind' => 'wordpress', 'url' => 'https://wp.example.test' ) === $mapping['config']['dataSources']['wordpress'],
+	'settings sync configures this WordPress site as a source'
+);
+check( 'wordpress' === $mapping['config']['defaultDataSource'], 'settings sync makes the connected WordPress source the build default' );
+check( true === $mapping['noindex'], 'settings sync mirrors WordPress search visibility' );
+check( str_repeat( 'a', 64 ) === $mapping['baseSettingsDigest'], 'settings sync uses the current compare-and-swap base' );
 
 Spacefast_Sync_State::save( Spacefast_Sync_State::defaults() );
 check(
@@ -458,6 +630,21 @@ check(
 	'reactivation recovers pending work'
 );
 
+$GLOBALS['spacefast_scheduled'] = array();
+Spacefast_Sync_State::save(
+	array_merge(
+		Spacefast_Sync_State::defaults(),
+		array(
+			'desired' => 1,
+			'delivered' => 1,
+			'last_status' => 'building',
+			'last_build_id' => 'bld_reactivate',
+		)
+	)
+);
+Spacefast_Plugin::activate();
+check( false !== wp_next_scheduled( Spacefast_Sync_State::HOOK ), 'reactivation resumes terminal polling for an accepted build' );
+
 Spacefast_Settings::disconnect();
 Spacefast_Settings::merge( $connection );
 $reconnected = Spacefast_Sync_State::mutate(
@@ -477,6 +664,10 @@ $GLOBALS['spacefast_post_types']['post']     = (object) array(
 	'public'       => true,
 	'show_in_rest' => true,
 );
+$GLOBALS['spacefast_post_types']['legacy_public'] = (object) array(
+	'public'       => true,
+	'show_in_rest' => false,
+);
 $before_delete = Spacefast_Sync_State::get();
 Spacefast_Plugin::post_deleted( 1, new WP_Post( 'internal', 'publish' ) );
 check(
@@ -489,6 +680,20 @@ Spacefast_Plugin::post_deleted( 2, new WP_Post( 'post', 'publish' ) );
 check(
 	$before_delete['desired'] + 1 === Spacefast_Sync_State::get()['desired'],
 	'rebuilds after deleting a public REST-visible post'
+);
+$headless_generation = Spacefast_Sync_State::get()['desired'];
+$change_recorded->setValue( null, false );
+Spacefast_Plugin::post_deleted( 3, new WP_Post( 'legacy_public', 'publish' ) );
+check(
+	$headless_generation === Spacefast_Sync_State::get()['desired'],
+	'headless mode ignores public content unavailable through the REST API'
+);
+Spacefast_Settings::merge( array( 'mode' => Spacefast_Settings::MODE_STATIC ) );
+$change_recorded->setValue( null, false );
+Spacefast_Plugin::post_deleted( 4, new WP_Post( 'legacy_public', 'publish' ) );
+check(
+	$headless_generation + 1 === Spacefast_Sync_State::get()['desired'],
+	'static mode republishes public content even when it is not REST-visible'
 );
 
 Spacefast_Settings::merge( $connection );
@@ -671,6 +876,10 @@ $create_body = json_decode( $static_requests[0][1]['body'], true );
 check( 'snapshot' === $create_body['publishMode'], 'publishes the export as an exact snapshot' );
 check( array( 'channel' => 'live' ) === $create_body['finalize'], 'requests live auto-finalize up front' );
 check(
+	'https://wp.example.test' === $create_body['source']['metadata']['siteUrl'],
+	'attributes the published version to its public WordPress site'
+);
+check(
 	str_ends_with( $static_requests[1][3], '/index.html' ),
 	'uploads only the file named by the opaque server target'
 );
@@ -680,15 +889,82 @@ check(
 );
 
 Spacefast_Sync_State::save(
-	array_merge( Spacefast_Sync_State::defaults(), array( 'desired' => 1 ) )
+	array_merge( Spacefast_Sync_State::defaults(), array( 'desired' => 2, 'active_generation' => 1 ) )
 );
 $static_ack = Spacefast_Sync_State::acknowledge_static(
 	Spacefast_Sync_State::get(),
 	'ver_static',
 	'live'
 );
-check( 'live' === $static_ack['last_status'], 'records verified live publication separately from builds' );
+check( 'pending' === $static_ack['last_status'], 'a change during export remains queued for one successor publish' );
+check( 1 === $static_ack['delivered'], 'static publishing acknowledges only the generation that was exported' );
 check( 'ver_static' === $static_ack['last_version_id'], 'keeps the last static version id' );
+
+$fallback_static_ack = Spacefast_Sync_State::acknowledge_static(
+	array_merge(
+		Spacefast_Sync_State::defaults(),
+		array( 'desired' => 4, 'delivered' => 3, 'active_generation' => 0 )
+	),
+	'ver_without_start_hook',
+	'live'
+);
+check( 4 === $fallback_static_ack['delivered'], 'static completion falls back to the desired generation when the exporter start hook is absent' );
+check( 'live' === $fallback_static_ack['last_status'], 'a missing exporter start hook cannot create a publish loop' );
+
+eval(
+	'namespace Simply_Static {
+		class Task {}
+		class Options {
+			private static $instance;
+			public static function instance() { return self::$instance ??= new self(); }
+			public function set($key, $value) { return $this; }
+			public function save() { return true; }
+		}
+		class Plugin {
+			public static $runs = 0;
+			private static $instance;
+			public static function instance() { return self::$instance ??= new self(); }
+			public function run_static_export() { self::$runs++; return true; }
+		}
+	}'
+);
+$static_connection = array_merge(
+	$connection,
+	array(
+		'mode' => Spacefast_Settings::MODE_STATIC,
+		'scope' => 'teams:read spaces:read spaces:write spaces:publish offline_access',
+	)
+);
+Spacefast_Settings::merge( $static_connection );
+$deliver_static = new ReflectionMethod( Spacefast_Plugin::class, 'deliver_static' );
+$stale_export = array_merge(
+	Spacefast_Sync_State::defaults(),
+	array(
+		'desired' => 1,
+		'last_status' => 'exporting',
+		'last_attempt_at' => time() - Spacefast_Plugin::STATIC_DELIVERY_STALE_SECONDS - 1,
+	)
+);
+Spacefast_Sync_State::save( $stale_export );
+$deliver_static->invoke( null, $stale_export );
+check( 1 === \Simply_Static\Plugin::$runs, 'an abandoned static export is restarted after the bounded stale window' );
+check( 'exporting' === Spacefast_Sync_State::get()['last_status'], 'a recovered static export returns to an active state' );
+check( time() - 2 <= Spacefast_Sync_State::get()['last_attempt_at'], 'a recovered static export records a fresh heartbeat' );
+
+\Simply_Static\Plugin::$runs = 0;
+$GLOBALS['spacefast_scheduled'] = array();
+$recent_export = array_merge(
+	$stale_export,
+	array( 'last_attempt_at' => time() )
+);
+Spacefast_Sync_State::save( $recent_export );
+$deliver_static->invoke( null, $recent_export );
+check( 0 === \Simply_Static\Plugin::$runs, 'a recent active export is not started twice' );
+check( false !== wp_next_scheduled( Spacefast_Sync_State::HOOK ), 'an active export retains a stale-recovery watchdog' );
+Spacefast_Plugin::static_publish_progress( 'uploading' );
+check( 'uploading' === Spacefast_Sync_State::get()['last_status'], 'static upload progress refreshes the delivery heartbeat' );
+
+Spacefast_Settings::merge( $connection );
 
 unlink( $archive . '/assets/app.js' );
 rmdir( $archive . '/assets' );

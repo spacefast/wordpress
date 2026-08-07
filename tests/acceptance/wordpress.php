@@ -26,6 +26,14 @@ spacefast_accept(
 	'Space creation handler is not registered.'
 );
 spacefast_accept(
+	10 === has_action( 'admin_post_spacefast_wordpress_prepare_static', array( 'Spacefast_Plugin', 'prepare_static' ) ),
+	'Simply Static setup handler is not registered.'
+);
+spacefast_accept(
+	10 === has_action( 'admin_post_spacefast_wordpress_save_settings', array( 'Spacefast_Plugin', 'save_settings' ) ),
+	'WordPress settings sync handler is not registered.'
+);
+spacefast_accept(
 	10 === has_action( 'admin_post_spacefast_wordpress_change_space', array( 'Spacefast_Plugin', 'change_space' ) ),
 	'Space change handler is not registered.'
 );
@@ -34,9 +42,18 @@ spacefast_accept(
 	'Static mode requested unexpected OAuth scopes.'
 );
 spacefast_accept(
-	array( 'teams:read', 'spaces:read', 'builds:trigger', 'offline_access' ) === Spacefast_OAuth::scopes( Spacefast_Settings::MODE_HEADLESS ),
+	array( 'teams:read', 'spaces:read', 'spaces:write', 'builds:trigger', 'offline_access' ) === Spacefast_OAuth::scopes( Spacefast_Settings::MODE_HEADLESS ),
 	'Headless mode requested unexpected OAuth scopes.'
 );
+
+wp_set_current_user( 1 );
+ob_start();
+Spacefast_Plugin::render_admin();
+$first_use_markup = (string) ob_get_clean();
+spacefast_accept( str_contains( $first_use_markup, 'Publish with Spacefast' ), 'First use does not lead with publishing.' );
+spacefast_accept( str_contains( $first_use_markup, 'Install Simply Static and continue' ), 'First use does not offer exporter setup.' );
+spacefast_accept( str_contains( $first_use_markup, '<details' ), 'Repository CMS setup is not progressively disclosed.' );
+spacefast_accept( ! str_contains( $first_use_markup, 'Choose how WordPress publishes' ), 'The old mode-first wizard is still rendered.' );
 
 Spacefast_Settings::merge(
 	array(
@@ -45,7 +62,11 @@ Spacefast_Settings::merge(
 		'refresh_token' => 'acceptance-refresh',
 		'expires_at' => time() + 900,
 		'team_id' => 'team_acceptance',
+		'team_name' => 'Acceptance Team',
 		'space_id' => 'spc_acceptance',
+		'space_name' => 'Acceptance Space',
+		'live_url' => 'https://acceptance.example.test',
+		'scope' => 'teams:read spaces:read spaces:write builds:trigger offline_access',
 		'verified_at' => time(),
 	)
 );
@@ -74,8 +95,25 @@ spacefast_accept(
 	'Public content did not receive the 60-second quiet window.'
 );
 
+ob_start();
+Spacefast_Plugin::render_admin();
+$connected_markup = (string) ob_get_clean();
+spacefast_accept( str_contains( $connected_markup, 'WordPress sync' ), 'Connected UI does not expose WordPress-owned sync settings.' );
+spacefast_accept( str_contains( $connected_markup, 'Open live site' ), 'Connected UI does not expose the live result.' );
+spacefast_accept( str_contains( $connected_markup, 'Technical details' ), 'Connected UI cannot disclose its receipt on demand.' );
+
+Spacefast_Settings::merge( array( 'mode' => Spacefast_Settings::MODE_STATIC ) );
+$change_recorded = new ReflectionProperty( Spacefast_Plugin::class, 'change_recorded' );
+$change_recorded->setValue( null, false );
+wp_clear_scheduled_hook( Spacefast_Sync_State::HOOK );
+wp_update_post( array( 'ID' => $post_id, 'post_title' => 'Static debounce acceptance' ) );
+spacefast_accept(
+	false !== wp_next_scheduled( Spacefast_Sync_State::HOOK ),
+	'Updating public content did not schedule a static publish.'
+);
+
 $plugin = get_plugin_data( WP_PLUGIN_DIR . '/spacefast-wordpress/spacefast-wordpress.php', false, false );
-spacefast_accept( '0.4.0' === $plugin['Version'], 'Unexpected plugin version.' );
+spacefast_accept( '0.5.0' === $plugin['Version'], 'Unexpected plugin version.' );
 spacefast_accept( 'https://github.com/spacefast/wordpress' === $plugin['UpdateURI'], 'Update URI is missing.' );
 
 Spacefast_Settings::disconnect();
