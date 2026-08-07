@@ -123,6 +123,7 @@ final class Spacefast_Static_Publisher {
 	 */
 	public static function manifest( string $archive_dir ): array {
 		$root = self::archive_root( $archive_dir );
+		self::ensure_public_config( $root );
 		$files = array();
 		$iterator = new RecursiveIteratorIterator(
 			new RecursiveDirectoryIterator( $root, FilesystemIterator::SKIP_DOTS )
@@ -160,6 +161,20 @@ final class Spacefast_Static_Publisher {
 
 	public static function reset(): void {
 		delete_option( self::OPTION );
+	}
+
+	private static function ensure_public_config( string $root ): void {
+		$config = $root . DIRECTORY_SEPARATOR . 'sf.jsonc';
+		if ( file_exists( $config ) || is_link( $config ) ) {
+			if ( ! is_file( $config ) || is_link( $config ) || ! is_readable( $config ) ) {
+				throw new RuntimeException( 'The generated Spacefast configuration is not a readable file.' );
+			}
+			return;
+		}
+		$written = file_put_contents( $config, "{\n  \"access\": \"public\"\n}\n", LOCK_EX );
+		if ( false === $written ) {
+			throw new RuntimeException( 'The generated export could not be made public on Spacefast.' );
+		}
 	}
 
 	private static function archive_root( string $archive_dir ): string {
