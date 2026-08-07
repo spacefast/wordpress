@@ -34,7 +34,10 @@ final class Spacefast_Client {
 			'redirection' => 0,
 			'reject_unsafe_urls' => true,
 			'sslverify' => true,
-			'limit_response_size' => 1024 * 1024,
+			// A first publish can return signed upload targets for thousands of
+			// files. Keep the response bounded, but match the API's 16 MB manifest
+			// ceiling so WordPress does not truncate a valid upload receipt.
+			'limit_response_size' => 16 * 1024 * 1024,
 			'headers' => array_merge(
 				array(
 					'Authorization' => 'Bearer ' . $access_token,
