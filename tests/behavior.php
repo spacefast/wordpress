@@ -116,6 +116,16 @@ function wp_json_encode( $value ): string {
 function get_post_type_object( string $post_type ) {
 	return $GLOBALS['spacefast_post_types'][ $post_type ] ?? null;
 }
+function get_post_types( array $args = array(), string $output = 'names' ): array {
+	$post_types = array_filter(
+		$GLOBALS['spacefast_post_types'],
+		static fn( object $post_type ): bool => ! isset( $args['public'] ) || $post_type->public === $args['public']
+	);
+	return 'objects' === $output ? $post_types : array_keys( $post_types );
+}
+function get_post_type_archive_link( string $post_type ) {
+	return $GLOBALS['spacefast_post_types'][ $post_type ]->archive_link ?? false;
+}
 function wp_generate_uuid4(): string {
 	return '00000000-0000-4000-8000-000000000001';
 }
@@ -839,6 +849,33 @@ check(
 	),
 	'publishes after export delivery and before cleanup'
 );
+$GLOBALS['spacefast_post_types']['case_study'] = (object) array(
+	'public' => true,
+	'has_archive' => 'case-studies',
+	'archive_link' => 'https://wp.example.test/case-studies/',
+);
+$GLOBALS['spacefast_post_types']['private_story'] = (object) array(
+	'public' => false,
+	'has_archive' => 'private-stories',
+	'archive_link' => 'https://wp.example.test/private-stories/',
+);
+check(
+	array( 'https://wp.example.test/manual/', 'https://wp.example.test/case-studies/' )
+		=== Spacefast_Plugin::simply_static_archive_urls(
+			array( 'https://wp.example.test/manual/', 'https://wp.example.test/case-studies/' )
+		),
+	'includes public custom post archives once in static exports'
+);
+$GLOBALS['spacefast_options']['simply-static'] = array(
+	'post_types' => array( 'post' ),
+	'post_types_configured' => true,
+);
+check(
+	array( 'https://wp.example.test/manual/' )
+		=== Spacefast_Plugin::simply_static_archive_urls( array( 'https://wp.example.test/manual/' ) ),
+	'respects the Simply Static post type selection for archives'
+);
+unset( $GLOBALS['spacefast_options']['simply-static'] );
 
 $archive = sys_get_temp_dir() . '/spacefast-wordpress-static-' . uniqid();
 mkdir( $archive );
