@@ -513,6 +513,24 @@ $invalid_space = $invalid_response->get_space();
 check( ! $invalid_space['ok'], 'a truncated successful Space response is never patched as empty config' );
 check( 'invalid_response_body' === $invalid_space['code'], 'truncated JSON has a stable retryable error' );
 
+$large_response = new Spacefast_Client(
+	static function ( string $url, array $args ): array {
+		unset( $url );
+		$body = json_encode( array( 'data' => array( 'receipt' => str_repeat( 'x', 2 * 1024 * 1024 ) ) ) );
+		$limit = (int) ( $args['limit_response_size'] ?? 0 );
+		return array(
+			'response' => array( 'code' => 200 ),
+			'body' => substr( (string) $body, 0, $limit ),
+		);
+	}
+);
+$large_space = $large_response->get_space();
+check( true === $large_space['ok'], 'large upload-instruction responses remain complete JSON' );
+check(
+	2 * 1024 * 1024 === strlen( (string) ( $large_space['data']['receipt'] ?? '' ) ),
+	'keeps the complete large upload receipt available to the publisher'
+);
+
 $poll_build = new ReflectionMethod( Spacefast_Plugin::class, 'poll_headless_build' );
 $GLOBALS['spacefast_scheduled'] = array();
 $failed_build_state = array_merge(
