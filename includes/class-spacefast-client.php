@@ -404,6 +404,9 @@ final class Spacefast_Client {
 		if ( ( 'https' !== $scheme && ! $development ) || ( ! $validated && ! $development ) ) {
 			return self::upload_error( false, 'unsafe_upload_url', 'Spacefast returned an unsafe upload URL.' );
 		}
+		if ( ( new WP_Http() )->block_request( $url ) ) {
+			return self::upload_error( false, 'upload_blocked', 'WordPress blocks this upload destination. Ask your host to allow the Spacefast upload host, then retry publishing.' );
+		}
 		$size = filesize( $file_path );
 		$stream = fopen( $file_path, 'rb' );
 		if ( false === $size || false === $stream ) {
@@ -423,6 +426,16 @@ final class Spacefast_Client {
 			$curl_headers[] = 'Content-Type: ' . self::content_type_for_file( $file_path );
 		}
 		$curl_headers[] = 'Content-Length: ' . $size;
+		$http_args = apply_filters( 'http_request_args', array(
+			'method' => $method,
+			'headers' => $headers,
+			'body' => null,
+			'redirection' => 0,
+			'blocking' => true,
+			'timeout' => 120,
+			'sslverify' => true,
+			'sslcertificates' => ABSPATH . WPINC . '/certificates/ca-bundle.crt',
+		), $url );
 		$handle = curl_init( $url );
 		curl_setopt_array(
 			$handle,
@@ -438,19 +451,43 @@ final class Spacefast_Client {
 					? CURLPROTO_HTTP | CURLPROTO_HTTPS
 					: CURLPROTO_HTTPS,
 				CURLOPT_CONNECTTIMEOUT => 10,
-				CURLOPT_TIMEOUT => 120,
+				CURLOPT_TIMEOUT => max( 1, min( 120, (int) $http_args['timeout'] ) ),
+				CURLOPT_CAINFO => $http_args['sslcertificates'],
+				CURLOPT_USERAGENT => 'Spacefast-WordPress/' . SPACEFAST_WORDPRESS_VERSION,
 				CURLOPT_SSL_VERIFYPEER => true,
 				CURLOPT_SSL_VERIFYHOST => 2,
 			),
 		);
+		$proxy = new WP_HTTP_Proxy();
+		if ( $proxy->is_enabled() && $proxy->send_through_proxy( $url ) ) {
+			curl_setopt( $handle, CURLOPT_PROXY, $proxy->host() );
+			curl_setopt( $handle, CURLOPT_PROXYPORT, $proxy->port() );
+			if ( $proxy->use_authentication() ) {
+				curl_setopt( $handle, CURLOPT_PROXYAUTH, CURLAUTH_ANY );
+				curl_setopt( $handle, CURLOPT_PROXYUSERPWD, $proxy->authentication() );
+			}
+		}
 		$result = curl_exec( $handle );
 		$status = (int) curl_getinfo( $handle, CURLINFO_RESPONSE_CODE );
-		$error = curl_error( $handle );
+		$errno = curl_errno( $handle );
+		$duration_ms = (int) round( curl_getinfo( $handle, CURLINFO_TOTAL_TIME ) * 1000 );
 		curl_close( $handle );
 		fclose( $stream );
 		if ( false === $result ) {
-			unset( $error );
-			return self::upload_error( true, 'network_error', 'The generated file could not be uploaded.' );
+			$retryable = in_array( $errno, array(
+				CURLE_COULDNT_RESOLVE_PROXY, CURLE_COULDNT_RESOLVE_HOST, CURLE_COULDNT_CONNECT,
+				CURLE_OPERATION_TIMEDOUT, CURLE_SEND_ERROR, CURLE_RECV_ERROR, CURLE_GOT_NOTHING, CURLE_PARTIAL_FILE,
+			), true );
+			$failure = self::upload_error(
+				$retryable,
+				'upload_curl_' . $errno,
+				in_array( $errno, array( CURLE_SSL_CACERT, CURLE_SSL_CACERT_BADFILE ), true )
+					? 'The upload certificate could not be verified. Ask your host to check the PHP certificate configuration, then retry publishing.'
+					: 'The file upload did not finish. Retry publishing. If it fails again, share the upload details below with your host.'
+			);
+			// curl_error can contain signed URLs or proxy credentials. The error-code description cannot.
+			$failure['data'] = array( 'curlCode' => $errno, 'reason' => curl_strerror( $errno ), 'host' => $host, 'durationMs' => $duration_ms );
+			return $failure;
 		}
 		return self::upload_response( $status );
 	}
