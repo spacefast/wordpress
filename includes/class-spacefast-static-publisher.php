@@ -8,16 +8,18 @@ final class Spacefast_Static_Publisher {
 	/**
 	 * Advance one bounded step of a Simply Static publish.
 	 *
-	 * @return array{done:bool,version_id:string,uploaded:int,total:int,status:string}
+	 * @return array{done:bool,version_id:string,uploaded:int,total:int,status:string,message?:string}
 	 */
 	public static function step(
 		string $archive_dir,
 		?Spacefast_Client $client = null,
-		string $publish_mode = 'snapshot'
+		string $publish_mode = 'snapshot',
+		?int $now = null
 	): array {
 		if ( ! in_array( $publish_mode, array( 'additive', 'snapshot' ), true ) ) {
 			throw new InvalidArgumentException( 'Static publish mode is invalid.' );
 		}
+		$now = $now ?? time();
 		$root = self::archive_root( $archive_dir );
 		$client = $client ?? new Spacefast_Client();
 		$state = get_option( self::OPTION, array() );
@@ -89,6 +91,9 @@ final class Spacefast_Static_Publisher {
 		$next_target = max( 0, (int) ( $state['next_target'] ?? 0 ) );
 
 		if ( isset( $targets[ $next_target ] ) && is_array( $targets[ $next_target ] ) ) {
+			if ( (int) ( $state['retry_at'] ?? 0 ) > $now ) {
+				return self::retry_progress( $state );
+			}
 			$target = $targets[ $next_target ];
 			$path = self::target_file( $root, (string) ( $target['path'] ?? '' ) );
 			$result = $client->upload_static_file( $target, $path );
@@ -96,8 +101,27 @@ final class Spacefast_Static_Publisher {
 				if ( in_array( $result['code'], array( 'upload_http_401', 'upload_http_403' ), true ) ) {
 					return self::resume( $state, $client );
 				}
+				Spacefast_Sync_State::mutate(
+					static function ( array $sync ) use ( $result, $target, $state ): array {
+						$sync['upload_diagnostic'] = array_merge( $result['data'], array(
+							'code' => $result['code'],
+							'file' => $target['path'],
+							'host' => (string) wp_parse_url( $target['url'], PHP_URL_HOST ),
+							'versionId' => $state['version_id'],
+						) );
+						return $sync;
+					}
+				);
+				$attempt = (int) ( $state['upload_attempts'] ?? 0 ) + 1;
+				if ( $result['retryable'] && $attempt < 4 ) {
+					$state['upload_attempts'] = $attempt;
+					$state['retry_at'] = $now + 2 ** $attempt;
+					update_option( self::OPTION, $state, false );
+					return self::retry_progress( $state );
+				}
 				throw new RuntimeException( $result['message'] );
 			}
+			unset( $state['upload_attempts'], $state['retry_at'] );
 			$state['next_target'] = $next_target + 1;
 			$state['uploaded'] = (int) ( $state['uploaded'] ?? 0 ) + 1;
 			update_option( self::OPTION, $state, false );
@@ -116,6 +140,18 @@ final class Spacefast_Static_Publisher {
 		}
 
 		return self::begin_finalizing( $state );
+	}
+
+	/** @param array<string,mixed> $state */
+	private static function retry_progress( array $state ): array {
+		return array(
+			'done' => false,
+			'version_id' => $state['version_id'],
+			'uploaded' => $state['uploaded'],
+			'total' => $state['total'],
+			'status' => 'uploading',
+			'message' => 'Upload interrupted. Retrying automatically from the last completed file.',
+		);
 	}
 
 	/**
@@ -203,7 +239,7 @@ final class Spacefast_Static_Publisher {
 
 	/**
 	 * @param array<string,mixed> $state State.
-	 * @return array{done:bool,version_id:string,uploaded:int,total:int,status:string}
+	 * @return array{done:bool,version_id:string,uploaded:int,total:int,status:string,message?:string}
 	 */
 	private static function resume( array $state, Spacefast_Client $client ): array {
 		$pages = (int) ( $state['pages'] ?? 0 ) + 1;
@@ -236,7 +272,7 @@ final class Spacefast_Static_Publisher {
 
 	/**
 	 * @param array<string,mixed> $state State.
-	 * @return array{done:bool,version_id:string,uploaded:int,total:int,status:string}
+	 * @return array{done:bool,version_id:string,uploaded:int,total:int,status:string,message?:string}
 	 */
 	private static function begin_finalizing( array $state ): array {
 		$state['phase'] = 'finalizing';
@@ -254,7 +290,7 @@ final class Spacefast_Static_Publisher {
 
 	/**
 	 * @param array<string,mixed> $state State.
-	 * @return array{done:bool,version_id:string,uploaded:int,total:int,status:string}
+	 * @return array{done:bool,version_id:string,uploaded:int,total:int,status:string,message?:string}
 	 */
 	private static function poll_version( array $state, Spacefast_Client $client ): array {
 		$polls = (int) ( $state['polls'] ?? 0 ) + 1;

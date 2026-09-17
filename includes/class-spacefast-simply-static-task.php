@@ -29,16 +29,16 @@ final class Spacefast_Simply_Static_Publish_Task extends \Simply_Static\Task {
 				$partial_export ? 'additive' : 'snapshot'
 			);
 			if ( ! $result['done'] ) {
-				Spacefast_Plugin::static_publish_progress( $result['status'] );
+				Spacefast_Plugin::static_publish_progress( $result['status'], $result['message'] ?? '' );
 				$this->save_status_message(
-					'finalizing' === $result['status']
+					$result['message'] ?? ( 'finalizing' === $result['status']
 						? __( 'Spacefast is activating the uploaded version', 'spacefast-wordpress' )
 						: sprintf(
 							/* translators: 1: uploaded files, 2: files requested by Spacefast. */
 							__( 'Publishing to Spacefast: %1$d of %2$d files', 'spacefast-wordpress' ),
 							$result['uploaded'],
 							$result['total']
-						)
+						) )
 				);
 				return false;
 			}

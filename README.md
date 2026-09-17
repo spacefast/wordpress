@@ -41,7 +41,13 @@ are additive so they cannot accidentally delete omitted site files. After a
 deletion, the plugin blocks partial publishing until a full export removes old
 files safely. Upload transfer is paged and processed one file
 per Simply Static background step so a large upload does not become one
-unbounded WordPress request.
+unbounded WordPress request. Transient upload failures retry the same file up to
+three times, with delays of 2, 4, and 8 seconds between attempts. Streaming
+uploads use the WordPress CA bundle, the `http_request_args` certificate and
+timeout settings, and the configured WordPress proxy. TLS verification stays
+enabled. Permanent failures stop with a recovery action; sanitized file, host,
+error-code, and timing details appear under **Technical details**. Signed URLs
+and authorization headers are never included in these diagnostics.
 
 Simply Static remains responsible for crawling WordPress and rewriting URLs.
 Spacefast never reads drafts, WordPress credentials, or the database. Dynamic

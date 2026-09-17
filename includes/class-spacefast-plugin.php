@@ -951,11 +951,12 @@ final class Spacefast_Plugin {
 		);
 	}
 
-	public static function static_publish_progress( string $status ): void {
+	public static function static_publish_progress( string $status, string $message = '' ): void {
 		if ( ! in_array( $status, array( 'uploading', 'finalizing' ), true ) ) return;
 		Spacefast_Sync_State::mutate(
-			static function ( array $state ) use ( $status ): array {
+			static function ( array $state ) use ( $status, $message ): array {
 				$state['last_status'] = $status;
+				$state['last_message'] = $message;
 				$state['last_attempt_at'] = time();
 				return $state;
 			}
@@ -1162,14 +1163,14 @@ final class Spacefast_Plugin {
 				<?php self::action_form( 'spacefast_wordpress_disconnect', __( 'Start over', 'spacefast-wordpress' ), 'secondary' ); ?>
 			<?php else : ?>
 				<div class="card" style="max-width:720px;padding:24px">
-					<h2 style="margin-top:0"><?php echo esc_html( $configured ? self::status_label( (string) $state['last_status'], $static_mode ) : __( 'Finishing setup', 'spacefast-wordpress' ) ); ?></h2>
+					<h2 style="margin-top:0"><?php echo esc_html( self::status_label( (string) $state['last_status'], $static_mode ) ); ?></h2>
 					<p><strong><?php echo esc_html( (string) $settings['space_name'] ); ?></strong> · <?php echo esc_html( (string) $settings['team_name'] ); ?></p>
-					<?php if ( $state['last_message'] ) : ?><div class="notice notice-error inline"><p><?php echo esc_html( (string) $state['last_message'] ); ?></p></div><?php endif; ?>
-					<?php if ( $settings['live_url'] ) : ?><p><a class="button button-secondary" href="<?php echo esc_url( (string) $settings['live_url'] ); ?>" target="_blank" rel="external noreferrer noopener"><?php esc_html_e( 'Open live site', 'spacefast-wordpress' ); ?></a></p><?php endif; ?>
+					<?php if ( $state['last_message'] ) : ?><div class="notice notice-<?php echo 'blocked' === $state['last_status'] ? 'error' : 'warning'; ?> inline"><p><?php echo esc_html( (string) $state['last_message'] ); ?></p></div><?php endif; ?>
+					<?php if ( $configured && $settings['live_url'] ) : ?><p><a class="button button-secondary" href="<?php echo esc_url( (string) $settings['live_url'] ); ?>" target="_blank" rel="external noreferrer noopener"><?php esc_html_e( 'Open live site', 'spacefast-wordpress' ); ?></a></p><?php endif; ?>
 					<?php if ( $state['last_success_at'] ) : ?><p class="description"><?php echo esc_html( sprintf( __( 'Last published %s', 'spacefast-wordpress' ), wp_date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), (int) $state['last_success_at'] ) ) ); ?></p><?php endif; ?>
-					<?php if ( max( 0, (int) $state['desired'] - (int) $state['delivered'] ) ) : ?><p><?php esc_html_e( 'Changes are waiting. Spacefast will combine them into the next publish.', 'spacefast-wordpress' ); ?></p><?php endif; ?>
+					<?php if ( 'pending' === $state['last_status'] && max( 0, (int) $state['desired'] - (int) $state['delivered'] ) ) : ?><p><?php esc_html_e( 'Changes are waiting. Spacefast will combine them into the next publish.', 'spacefast-wordpress' ); ?></p><?php endif; ?>
 					<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px">
-						<?php if ( $static_mode ) : ?><?php self::action_form( 'spacefast_wordpress_publish', $configured ? __( 'Publish now', 'spacefast-wordpress' ) : __( 'Retry publish', 'spacefast-wordpress' ), 'primary' ); ?>
+						<?php if ( $static_mode ) : ?><?php self::action_form( 'spacefast_wordpress_publish', 'blocked' === $state['last_status'] || ! $configured ? __( 'Retry publish', 'spacefast-wordpress' ) : __( 'Publish now', 'spacefast-wordpress' ), 'primary' ); ?>
 						<?php else : ?><?php self::action_form( 'spacefast_wordpress_build', $configured ? __( 'Build now', 'spacefast-wordpress' ) : __( 'Retry build', 'spacefast-wordpress' ), 'primary' ); ?><?php endif; ?>
 					</div>
 				</div>
@@ -1187,7 +1188,7 @@ final class Spacefast_Plugin {
 					<?php submit_button( __( 'Save and sync', 'spacefast-wordpress' ), 'secondary', 'submit', false ); ?>
 				</form>
 				<?php if ( $settings['last_settings_sync_at'] ) : ?><p class="description"><?php echo esc_html( sprintf( __( 'Settings last synced %s', 'spacefast-wordpress' ), wp_date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), (int) $settings['last_settings_sync_at'] ) ) ); ?></p><?php endif; ?>
-				<details style="max-width:720px;margin-top:12px"><summary><?php esc_html_e( 'Technical details', 'spacefast-wordpress' ); ?></summary><p><?php echo esc_html( $static_mode ? __( 'Version ID:', 'spacefast-wordpress' ) : __( 'Build ID:', 'spacefast-wordpress' ) ); ?> <code><?php echo esc_html( (string) ( $static_mode ? ( $state['last_version_id'] ?: '—' ) : ( $state['last_build_id'] ?: '—' ) ) ); ?></code></p></details>
+				<details style="max-width:720px;margin-top:12px"><summary><?php esc_html_e( 'Technical details', 'spacefast-wordpress' ); ?></summary><p><?php echo esc_html( $static_mode ? __( 'Version ID:', 'spacefast-wordpress' ) : __( 'Build ID:', 'spacefast-wordpress' ) ); ?> <code><?php echo esc_html( (string) ( $static_mode ? ( $state['last_version_id'] ?: '—' ) : ( $state['last_build_id'] ?: '—' ) ) ); ?></code></p><?php if ( $state['upload_diagnostic'] ) : ?><p><?php esc_html_e( 'Last upload error', 'spacefast-wordpress' ); ?></p><pre style="white-space:pre-wrap"><?php echo esc_html( wp_json_encode( $state['upload_diagnostic'], JSON_PRETTY_PRINT ) ); ?></pre><?php endif; ?></details>
 				<?php if ( $static_mode && ! self::simply_static_available() ) : ?>
 					<div class="notice notice-warning inline"><p><?php esc_html_e( 'Static WordPress needs the free Simply Static plugin.', 'spacefast-wordpress' ); ?> <?php echo wp_kses_post( self::simply_static_action_link() ); ?></p></div>
 				<?php endif; ?>

@@ -45,8 +45,8 @@ function add_action( string $hook, $callback, int $priority = 10, int $accepted_
 function add_filter( string $hook, $callback, int $priority = 10, int $accepted_args = 1 ): void {
 	$GLOBALS['spacefast_hooks'][ $hook ] = array( $callback, $priority, $accepted_args );
 }
-function wp_parse_url( string $value ) {
-	return parse_url( $value );
+function wp_parse_url( string $value, int $component = -1 ) {
+	return parse_url( $value, $component );
 }
 function wp_check_filetype( string $path ): array {
 	return array(
@@ -913,6 +913,7 @@ check(
 );
 
 $static_requests = array();
+$upload_status = 503;
 $static_client = new Spacefast_Client(
 	static function ( string $url, array $args ) use ( &$static_requests ): array {
 		$static_requests[] = array( $url, $args );
@@ -970,12 +971,18 @@ $static_client = new Spacefast_Client(
 			)
 		);
 	},
-	static function ( string $url, string $method, array $headers, string $file ) use ( &$static_requests ): array {
+	static function ( string $url, string $method, array $headers, string $file ) use ( &$static_requests, &$upload_status ): array {
 		$static_requests[] = array( $url, $method, $headers, $file );
-		return response( 204 );
+		return response( $upload_status );
 	}
 );
-$publish_step = Spacefast_Static_Publisher::step( $archive, $static_client );
+$publish_step = Spacefast_Static_Publisher::step( $archive, $static_client, 'snapshot', 100 );
+check( 0 === $publish_step['uploaded'], 'a failed upload does not advance the cursor' );
+check( 'Upload interrupted. Retrying automatically from the last completed file.' === $publish_step['message'], 'transient errors keep the background export running' );
+$upload_status = 204;
+$waiting = Spacefast_Static_Publisher::step( $archive, $static_client, 'snapshot', 101 );
+check( 0 === $waiting['uploaded'], 'backoff prevents uploading before the retry deadline' );
+$publish_step = Spacefast_Static_Publisher::step( $archive, $static_client, 'snapshot', 102 );
 check( false === $publish_step['done'], 'uploads a bounded target per background step' );
 check( 1 === $publish_step['uploaded'], 'records completed generated-file uploads' );
 $publish_done = Spacefast_Static_Publisher::step( $archive, $static_client );
@@ -1004,9 +1011,32 @@ check(
 	'uploads the generated public-access declaration with the export'
 );
 check(
-	str_ends_with( $static_requests[3][3], '/assets/app.js' ),
+	str_ends_with( $static_requests[4][3], '/assets/app.js' ),
 	'uploads the next opaque target after resuming'
 );
+
+Spacefast_Static_Publisher::reset();
+$upload_status = 503;
+foreach ( array( 200, 202, 206 ) as $retry_time ) {
+    $retry = Spacefast_Static_Publisher::step( $archive, $static_client, 'snapshot', $retry_time );
+    check( 0 === $retry['uploaded'], 'repeated failure preserves upload progress' );
+}
+try {
+    Spacefast_Static_Publisher::step( $archive, $static_client, 'snapshot', 214 );
+    throw new LogicException( 'Upload retries did not stop.' );
+} catch ( RuntimeException $error ) {
+    check( 'Spacefast rejected a generated file upload.' === $error->getMessage(), 'retry exhaustion reports the upload failure' );
+}
+Spacefast_Static_Publisher::reset();
+check( 'upload_http_503' === Spacefast_Sync_State::get()['upload_diagnostic']['code'], 'upload evidence survives exporter cleanup' );
+$upload_status = 422;
+try {
+    Spacefast_Static_Publisher::step( $archive, $static_client, 'snapshot', 300 );
+    throw new LogicException( 'Permanent rejection was retried.' );
+} catch ( RuntimeException $error ) {
+    check( 'Spacefast rejected a generated file upload.' === $error->getMessage(), 'permanent rejection fails immediately' );
+}
+Spacefast_Static_Publisher::reset();
 
 Spacefast_Sync_State::save(
 	array_merge( Spacefast_Sync_State::defaults(), array( 'desired' => 2, 'active_generation' => 1 ) )

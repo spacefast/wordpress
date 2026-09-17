@@ -102,6 +102,23 @@ spacefast_accept( str_contains( $connected_markup, 'WordPress sync' ), 'Connecte
 spacefast_accept( str_contains( $connected_markup, 'Open live site' ), 'Connected UI does not expose the live result.' );
 spacefast_accept( str_contains( $connected_markup, 'Technical details' ), 'Connected UI cannot disclose its receipt on demand.' );
 
+Spacefast_Settings::merge( array( 'mode' => Spacefast_Settings::MODE_STATIC, 'verified_at' => 0 ) );
+Spacefast_Plugin::static_publish_failed( 'The file upload did not finish. Retry publishing.' );
+ob_start();
+Spacefast_Plugin::render_admin();
+$failed_markup = (string) ob_get_clean();
+spacefast_accept( str_contains( $failed_markup, 'Needs attention' ), 'First publish hides the failed stage.' );
+spacefast_accept( ! str_contains( $failed_markup, 'Open live site' ), 'An unpublished site is offered as live.' );
+spacefast_accept( ! str_contains( $failed_markup, 'Changes are waiting.' ), 'A failed upload is described as queued progress.' );
+spacefast_accept( str_contains( $failed_markup, 'Retry publish' ), 'A failed publish has no recovery action.' );
+Spacefast_Plugin::static_publish_completed( 'ver_acceptance', 'live' );
+ob_start();
+Spacefast_Plugin::render_admin();
+$live_markup = (string) ob_get_clean();
+spacefast_accept( str_contains( $live_markup, 'Open live site' ), 'Successful first publish does not expose the live page.' );
+
+require __DIR__ . '/upload.php';
+
 Spacefast_Settings::merge( array( 'mode' => Spacefast_Settings::MODE_STATIC ) );
 $change_recorded = new ReflectionProperty( Spacefast_Plugin::class, 'change_recorded' );
 $change_recorded->setValue( null, false );
@@ -113,7 +130,7 @@ spacefast_accept(
 );
 
 $plugin = get_plugin_data( WP_PLUGIN_DIR . '/spacefast-wordpress/spacefast-wordpress.php', false, false );
-spacefast_accept( '0.5.7' === $plugin['Version'], 'Unexpected plugin version.' );
+spacefast_accept( '0.5.8' === $plugin['Version'], 'Unexpected plugin version.' );
 spacefast_accept( 'https://github.com/spacefast/wordpress' === $plugin['UpdateURI'], 'Update URI is missing.' );
 
 Spacefast_Settings::disconnect();

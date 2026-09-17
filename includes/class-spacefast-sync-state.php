@@ -7,7 +7,7 @@ final class Spacefast_Sync_State {
 	const HOOK = 'spacefast_wordpress_deliver';
 
 	/**
-	 * @return array{desired:int,delivered:int,event_id:string,reasons:array<int,string>,attempts:int,next_at:int,last_status:string,last_message:string,last_build_id:string,last_version_id:string,last_change_at:int,last_attempt_at:int,last_success_at:int,last_settings_sync_at:int,active_generation:int,settings_pending:bool}
+	 * @return array{desired:int,delivered:int,event_id:string,reasons:array<int,string>,attempts:int,next_at:int,last_status:string,last_message:string,upload_diagnostic:?array,last_build_id:string,last_version_id:string,last_change_at:int,last_attempt_at:int,last_success_at:int,last_settings_sync_at:int,active_generation:int,settings_pending:bool}
 	 */
 	public static function defaults(): array {
 		return array(
@@ -19,6 +19,7 @@ final class Spacefast_Sync_State {
 			'next_at' => 0,
 			'last_status' => 'idle',
 			'last_message' => '',
+			'upload_diagnostic' => null,
 			'last_build_id' => '',
 			'last_version_id' => '',
 			'last_change_at' => 0,
@@ -31,7 +32,7 @@ final class Spacefast_Sync_State {
 	}
 
 	/**
-	 * @return array{desired:int,delivered:int,event_id:string,reasons:array<int,string>,attempts:int,next_at:int,last_status:string,last_message:string,last_build_id:string,last_version_id:string,last_change_at:int,last_attempt_at:int,last_success_at:int,last_settings_sync_at:int,active_generation:int,settings_pending:bool}
+	 * @return array{desired:int,delivered:int,event_id:string,reasons:array<int,string>,attempts:int,next_at:int,last_status:string,last_message:string,upload_diagnostic:?array,last_build_id:string,last_version_id:string,last_change_at:int,last_attempt_at:int,last_success_at:int,last_settings_sync_at:int,active_generation:int,settings_pending:bool}
 	 */
 	public static function get(): array {
 		$value = get_option( self::OPTION, array() );
