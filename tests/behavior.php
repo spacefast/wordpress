@@ -927,6 +927,10 @@ $static_client = new Spacefast_Client(
 			);
 		}
 		if ( str_contains( $url, '/uploads/resume' ) ) {
+			// The completion check after the last page finds nothing missing.
+			if ( count( array_filter( $static_requests, static fn ( array $request ): bool => str_contains( $request[0], '/uploads/resume' ) ) ) > 1 ) {
+				return response( 200, array( 'upload' => null ) );
+			}
 			return response(
 				200,
 				array(
@@ -1099,8 +1103,8 @@ $retry_client = new Spacefast_Client(
 		if ( 'GET' === $args['method'] ) {
 			return response( 200, array( 'id' => 'ver_retry', 'status' => 'ready', 'isCurrentProduction' => true ) );
 		}
-		if ( str_contains( $url, '/finalize' ) ) {
-			return response( 202, array( 'id' => 'ver_retry', 'status' => 'finalizing' ) );
+		if ( str_contains( $url, '/uploads/resume' ) ) {
+			return response( 200, array( 'upload' => null ) );
 		}
 		return response(
 			201,
@@ -1131,12 +1135,17 @@ $retry_creates = array_filter(
 	$retry_requests,
 	static fn ( array $request ): bool => 'POST' === $request[1] && str_ends_with( $request[0], '/versions' )
 );
+$retry_confirms = array_filter(
+	$retry_requests,
+	static fn ( array $request ): bool => str_contains( $request[0], '/versions/ver_retry/uploads/resume' )
+);
 $retry_finalizes = array_filter(
 	$retry_requests,
-	static fn ( array $request ): bool => str_contains( $request[0], '/versions/ver_retry/finalize?async=1' )
+	static fn ( array $request ): bool => str_contains( $request[0], '/finalize' )
 );
 check( 1 === count( $retry_creates ), 'a retried publish never declares a second version' );
-check( 1 === count( $retry_finalizes ), 'a finished upload asks Spacefast to finalize once' );
+check( 1 === count( $retry_confirms ), 'a finished upload confirms the missing set once before waiting' );
+check( 0 === count( $retry_finalizes ), 'the plugin never calls finalize, which its scopes do not grant' );
 
 Spacefast_Static_Publisher::reset();
 $expired_uploads = 0;
@@ -1146,16 +1155,14 @@ $expired_client = new Spacefast_Client(
 		if ( 'GET' === $args['method'] ) {
 			return response( 200, array( 'id' => 'ver_expired', 'status' => 'ready', 'isCurrentProduction' => true ) );
 		}
-		if ( str_contains( $url, '/finalize' ) ) {
-			return response( 202, array( 'id' => 'ver_expired', 'status' => 'finalizing' ) );
-		}
 		$upload = array(
 			'summary' => array( 'upload' => 1, 'reused' => 0, 'ignored' => 0 ),
 			'targets' => array( $retry_target ),
 		);
 		if ( str_contains( $url, '/uploads/resume' ) ) {
 			$expired_resumes++;
-			return 1 === $expired_resumes ? response( 503 ) : response( 200, array( 'upload' => $upload ) );
+			if ( 1 === $expired_resumes ) return response( 503 );
+			return response( 200, array( 'upload' => 2 === $expired_resumes ? $upload : null ) );
 		}
 		return response( 201, array( 'versionId' => 'ver_expired', 'upload' => $upload ) );
 	},
@@ -1170,6 +1177,36 @@ $expired_step = Spacefast_Static_Publisher::step( $archive, $expired_client );
 check( 2 === $expired_resumes && 1 === $expired_uploads, 'a failed refresh is retried before any stale target is sent again' );
 $expired_step = Spacefast_Static_Publisher::step( $archive, $expired_client );
 check( 2 === $expired_uploads && 1 === $expired_step['uploaded'], 'the refreshed target uploads' );
+
+Spacefast_Static_Publisher::reset();
+$missing_uploads = 0;
+$missing_resumes = 0;
+$missing_client = new Spacefast_Client(
+	static function ( string $url, array $args ) use ( &$missing_resumes, $retry_target ): array {
+		if ( 'GET' === $args['method'] ) {
+			return response( 200, array( 'id' => 'ver_missing', 'status' => 'ready', 'isCurrentProduction' => true ) );
+		}
+		$upload = array(
+			'summary' => array( 'upload' => 1, 'reused' => 0, 'ignored' => 0 ),
+			'targets' => array( $retry_target ),
+		);
+		if ( str_contains( $url, '/uploads/resume' ) ) {
+			$missing_resumes++;
+			return response( 200, array( 'upload' => 1 === $missing_resumes ? $upload : null ) );
+		}
+		return response( 201, array( 'versionId' => 'ver_missing', 'upload' => $upload ) );
+	},
+	static function () use ( &$missing_uploads ): array {
+		$missing_uploads++;
+		return response( 204 );
+	}
+);
+for ( $i = 0; $i < 6; $i++ ) {
+	$missing_step = Spacefast_Static_Publisher::step( $archive, $missing_client );
+	if ( $missing_step['done'] ) break;
+}
+check( true === $missing_step['done'] && 2 === $missing_uploads, 'a file the server still lacks is uploaded again before waiting' );
+check( 2 === $missing_resumes, 'the completion check runs again after the missing file lands' );
 
 Spacefast_Static_Publisher::reset();
 $rejecting_client = new Spacefast_Client(

@@ -33,7 +33,7 @@ OAuth access is limited to the Team you authorize and the mode you choose. WordP
 
 = 0.5.8 =
 * Retry transient upload, upload-refresh, and finalize failures in place instead of restarting the whole export as a new version.
-* Ask Spacefast to finalize once every file has uploaded, so activation no longer depends on the upload-completion signal alone.
+* Once every file has uploaded, ask Spacefast which files it still lacks, upload any it names, and let that check trigger activation instead of depending on the upload-completion signal alone.
 
 = 0.5.7 =
 * Include public custom post type archive routes in Simply Static exports.

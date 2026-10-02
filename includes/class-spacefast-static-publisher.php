@@ -274,14 +274,33 @@ final class Spacefast_Static_Publisher {
 		if ( $polls > 300 ) {
 			throw new RuntimeException( 'Spacefast did not finish publishing the version.' );
 		}
-		if ( empty( $state['finalize_requested'] ) ) {
-			$finalize = $client->finalize_static_version( (string) $state['version_id'] );
-			if ( ! $finalize['ok'] && $finalize['retryable'] ) {
-				return self::retry_or_throw( $state, $finalize, 'finalizing' );
+		if ( empty( $state['completion_confirmed'] ) ) {
+			// Ask Spacefast which files it still lacks. When none are missing, the
+			// refresh runs the same completion the runtime's upload callback runs,
+			// so a lost callback cannot strand the version; when some are, upload
+			// them before waiting.
+			$refresh = $client->resume_static_upload( (string) $state['version_id'] );
+			if ( ! $refresh['ok'] && $refresh['retryable'] ) {
+				return self::retry_or_throw( $state, $refresh, 'finalizing' );
 			}
-			// A refusal here usually means auto-finalize already owns the version;
-			// the status poll below reports whatever it settles to.
-			$state['finalize_requested'] = true;
+			$missing = $refresh['ok'] ? ( $refresh['data']['upload'] ?? null ) : null;
+			if ( is_array( $missing ) && ! empty( $missing['targets'] ) ) {
+				$state['phase'] = 'uploading';
+				$state['upload'] = $missing;
+				$state['next_target'] = 0;
+				$state['retries'] = 0;
+				update_option( self::OPTION, $state, false );
+				return array(
+					'done' => false,
+					'version_id' => (string) $state['version_id'],
+					'uploaded' => (int) $state['uploaded'],
+					'total' => (int) $state['total'],
+					'status' => 'uploading',
+				);
+			}
+			// A refusal means the version already left the draft states; the
+			// status poll below reports what it settled to.
+			$state['completion_confirmed'] = true;
 			$state['retries'] = 0;
 			update_option( self::OPTION, $state, false );
 		}

@@ -310,23 +310,6 @@ final class Spacefast_Client {
 	}
 
 	/**
-	 * Ask Spacefast to finalize an uploaded version. Auto-finalize normally does
-	 * this when the last upload lands; an explicit request joins the same
-	 * finalize operation, so a lost completion signal cannot strand the version.
-	 *
-	 * @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>}
-	 */
-	public function finalize_static_version( string $version_id ): array {
-		$settings = Spacefast_Settings::get();
-		return $this->request(
-			'POST',
-			'/v1/spaces/' . rawurlencode( $settings['space_id'] ) . '/versions/'
-				. rawurlencode( $version_id ) . '/finalize?async=1',
-			array( 'channel' => 'live' )
-		);
-	}
-
-	/**
 	 * @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>}
 	 */
 	public function get_static_version( string $version_id ): array {
