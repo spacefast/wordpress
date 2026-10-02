@@ -10,6 +10,9 @@ final class Spacefast_Static_Publisher {
 	// so without the wait every retry would land within the same second.
 	const MAX_TRANSIENT_RETRIES = 8;
 	const MAX_RETRY_DELAY_SECONDS = 60;
+	// Upload rounds the completion check may request before the publish gives
+	// up on files the runtime keeps reporting as missing.
+	const MAX_COMPLETION_ROUNDS = 3;
 
 	/**
 	 * Advance one bounded step of a Simply Static publish.
@@ -297,6 +300,11 @@ final class Spacefast_Static_Publisher {
 			}
 			$missing = $refresh['ok'] ? ( $refresh['data']['upload'] ?? null ) : null;
 			if ( is_array( $missing ) && ! empty( $missing['targets'] ) ) {
+				$rounds = (int) ( $state['completion_rounds'] ?? 0 ) + 1;
+				if ( $rounds > self::MAX_COMPLETION_ROUNDS ) {
+					throw new RuntimeException( 'Spacefast kept reporting uploaded files as missing.' );
+				}
+				$state['completion_rounds'] = $rounds;
 				$state['phase'] = 'uploading';
 				$state['upload'] = $missing;
 				$state['next_target'] = 0;

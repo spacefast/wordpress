@@ -1221,6 +1221,30 @@ check( true === $missing_step['done'] && 2 === $missing_uploads, 'a file the ser
 check( 2 === $missing_resumes, 'the completion check runs again after the missing file lands' );
 
 Spacefast_Static_Publisher::reset();
+$stuck_client = new Spacefast_Client(
+	static function ( string $url, array $args ) use ( $retry_target ): array {
+		$upload = array(
+			'summary' => array( 'upload' => 1, 'reused' => 0, 'ignored' => 0 ),
+			'targets' => array( $retry_target ),
+		);
+		if ( str_contains( $url, '/uploads/resume' ) ) {
+			return response( 200, array( 'upload' => $upload ) );
+		}
+		return response( 201, array( 'versionId' => 'ver_stuck', 'upload' => $upload ) );
+	},
+	static fn (): array => response( 204 )
+);
+$stuck = false;
+try {
+	for ( $i = 0; $i < 20; $i++ ) {
+		Spacefast_Static_Publisher::step( $archive, $stuck_client );
+	}
+} catch ( RuntimeException $error ) {
+	$stuck = 'Spacefast kept reporting uploaded files as missing.' === $error->getMessage();
+}
+check( $stuck, 'a file the runtime never records ends the publish after bounded upload rounds' );
+
+Spacefast_Static_Publisher::reset();
 $rejecting_client = new Spacefast_Client(
 	static function ( string $url, array $args ) use ( $retry_target ): array {
 		return response(
