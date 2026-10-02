@@ -4,6 +4,10 @@ defined( 'ABSPATH' ) || exit;
 
 final class Spacefast_Static_Publisher {
 	const OPTION = 'spacefast_wordpress_publish_state';
+	// Consecutive transient failures tolerated before a publish gives up. Each
+	// retry is one background step, so a brief outage no longer restarts the
+	// whole export as a new version.
+	const MAX_TRANSIENT_RETRIES = 5;
 
 	/**
 	 * Advance one bounded step of a Simply Static publish.
@@ -96,8 +100,9 @@ final class Spacefast_Static_Publisher {
 				if ( in_array( $result['code'], array( 'upload_http_401', 'upload_http_403' ), true ) ) {
 					return self::resume( $state, $client );
 				}
-				throw new RuntimeException( $result['message'] );
+				return self::retry_or_throw( $state, $result, 'uploading' );
 			}
+			$state['retries'] = 0;
 			$state['next_target'] = $next_target + 1;
 			$state['uploaded'] = (int) ( $state['uploaded'] ?? 0 ) + 1;
 			update_option( self::OPTION, $state, false );
@@ -212,8 +217,9 @@ final class Spacefast_Static_Publisher {
 		}
 		$result = $client->resume_static_upload( (string) $state['version_id'] );
 		if ( ! $result['ok'] ) {
-			throw new RuntimeException( $result['message'] );
+			return self::retry_or_throw( $state, $result, 'uploading' );
 		}
+		$state['retries'] = 0;
 		$upload = $result['data']['upload'] ?? null;
 		if ( null !== $upload && ! is_array( $upload ) ) {
 			throw new RuntimeException( 'Spacefast returned invalid upload instructions.' );
@@ -261,6 +267,17 @@ final class Spacefast_Static_Publisher {
 		if ( $polls > 300 ) {
 			throw new RuntimeException( 'Spacefast did not finish publishing the version.' );
 		}
+		if ( empty( $state['finalize_requested'] ) ) {
+			$finalize = $client->finalize_static_version( (string) $state['version_id'] );
+			if ( ! $finalize['ok'] && $finalize['retryable'] ) {
+				return self::retry_or_throw( $state, $finalize, 'finalizing' );
+			}
+			// A refusal here usually means auto-finalize already owns the version;
+			// the status poll below reports whatever it settles to.
+			$state['finalize_requested'] = true;
+			$state['retries'] = 0;
+			update_option( self::OPTION, $state, false );
+		}
 		$result = $client->get_static_version( (string) $state['version_id'] );
 		if ( ! $result['ok'] ) {
 			if ( $result['retryable'] ) {
@@ -298,6 +315,30 @@ final class Spacefast_Static_Publisher {
 			'uploaded' => (int) $state['uploaded'],
 			'total' => (int) $state['total'],
 			'status' => 'finalizing',
+		);
+	}
+
+	/**
+	 * Keep the publish state and try the same step again on a transient failure,
+	 * up to MAX_TRANSIENT_RETRIES in a row. Anything else ends the publish.
+	 *
+	 * @param array<string,mixed> $state State.
+	 * @param array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>} $result Failed result.
+	 * @return array{done:bool,version_id:string,uploaded:int,total:int,status:string}
+	 */
+	private static function retry_or_throw( array $state, array $result, string $status ): array {
+		$retries = (int) ( $state['retries'] ?? 0 ) + 1;
+		if ( ! $result['retryable'] || $retries > self::MAX_TRANSIENT_RETRIES ) {
+			throw new RuntimeException( $result['message'] );
+		}
+		$state['retries'] = $retries;
+		update_option( self::OPTION, $state, false );
+		return array(
+			'done' => false,
+			'version_id' => (string) ( $state['version_id'] ?? '' ),
+			'uploaded' => (int) ( $state['uploaded'] ?? 0 ),
+			'total' => (int) ( $state['total'] ?? 0 ),
+			'status' => $status,
 		);
 	}
 }

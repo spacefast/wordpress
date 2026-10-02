@@ -1084,6 +1084,85 @@ check( false !== wp_next_scheduled( Spacefast_Sync_State::HOOK ), 'an active exp
 Spacefast_Plugin::static_publish_progress( 'uploading' );
 check( 'uploading' === Spacefast_Sync_State::get()['last_status'], 'static upload progress refreshes the delivery heartbeat' );
 
+Spacefast_Static_Publisher::reset();
+$retry_requests = array();
+$retry_uploads = 0;
+$retry_target = array(
+	'path' => 'index.html',
+	'method' => 'PUT',
+	'url' => 'https://uploads.example.test/retry',
+	'headers' => array(),
+);
+$retry_client = new Spacefast_Client(
+	static function ( string $url, array $args ) use ( &$retry_requests, $retry_target ): array {
+		$retry_requests[] = array( $url, $args['method'] );
+		if ( 'GET' === $args['method'] ) {
+			return response( 200, array( 'id' => 'ver_retry', 'status' => 'ready', 'isCurrentProduction' => true ) );
+		}
+		if ( str_contains( $url, '/finalize' ) ) {
+			return response( 202, array( 'id' => 'ver_retry', 'status' => 'finalizing' ) );
+		}
+		return response(
+			201,
+			array(
+				'versionId' => 'ver_retry',
+				'upload' => array(
+					'summary' => array( 'upload' => 1, 'reused' => 0, 'ignored' => 0 ),
+					'targets' => array( $retry_target ),
+				),
+			)
+		);
+	},
+	static function () use ( &$retry_uploads ): array {
+		$retry_uploads++;
+		return response( 1 === $retry_uploads ? 503 : 204 );
+	}
+);
+$retry_step = Spacefast_Static_Publisher::step( $archive, $retry_client );
+check( false === $retry_step['done'] && 0 === $retry_step['uploaded'], 'a transient upload failure keeps the publish running' );
+check( 'ver_retry' === $retry_step['version_id'], 'a transient upload failure keeps the same Spacefast version' );
+$retry_step = Spacefast_Static_Publisher::step( $archive, $retry_client );
+check( 1 === $retry_step['uploaded'] && 2 === $retry_uploads, 'the next step retries the same upload target' );
+$retry_step = Spacefast_Static_Publisher::step( $archive, $retry_client );
+check( 'finalizing' === $retry_step['status'], 'a finished upload waits for activation' );
+$retry_step = Spacefast_Static_Publisher::step( $archive, $retry_client );
+check( true === $retry_step['done'] && 'live' === $retry_step['status'], 'the retried publish goes live' );
+$retry_creates = array_filter(
+	$retry_requests,
+	static fn ( array $request ): bool => 'POST' === $request[1] && str_ends_with( $request[0], '/versions' )
+);
+$retry_finalizes = array_filter(
+	$retry_requests,
+	static fn ( array $request ): bool => str_contains( $request[0], '/versions/ver_retry/finalize?async=1' )
+);
+check( 1 === count( $retry_creates ), 'a retried publish never declares a second version' );
+check( 1 === count( $retry_finalizes ), 'a finished upload asks Spacefast to finalize once' );
+
+Spacefast_Static_Publisher::reset();
+$rejecting_client = new Spacefast_Client(
+	static function ( string $url, array $args ) use ( $retry_target ): array {
+		return response(
+			201,
+			array(
+				'versionId' => 'ver_rejected',
+				'upload' => array(
+					'summary' => array( 'upload' => 1, 'reused' => 0, 'ignored' => 0 ),
+					'targets' => array( $retry_target ),
+				),
+			)
+		);
+	},
+	static fn (): array => response( 400 )
+);
+$rejected = false;
+try {
+	Spacefast_Static_Publisher::step( $archive, $rejecting_client );
+} catch ( RuntimeException $error ) {
+	$rejected = 'Spacefast rejected a generated file upload.' === $error->getMessage();
+}
+check( $rejected, 'a rejected upload still ends the publish' );
+Spacefast_Static_Publisher::reset();
+
 Spacefast_Settings::merge( $connection );
 
 unlink( $archive . '/assets/app.js' );
