@@ -1139,6 +1139,39 @@ check( 1 === count( $retry_creates ), 'a retried publish never declares a second
 check( 1 === count( $retry_finalizes ), 'a finished upload asks Spacefast to finalize once' );
 
 Spacefast_Static_Publisher::reset();
+$expired_uploads = 0;
+$expired_resumes = 0;
+$expired_client = new Spacefast_Client(
+	static function ( string $url, array $args ) use ( &$expired_resumes, $retry_target ): array {
+		if ( 'GET' === $args['method'] ) {
+			return response( 200, array( 'id' => 'ver_expired', 'status' => 'ready', 'isCurrentProduction' => true ) );
+		}
+		if ( str_contains( $url, '/finalize' ) ) {
+			return response( 202, array( 'id' => 'ver_expired', 'status' => 'finalizing' ) );
+		}
+		$upload = array(
+			'summary' => array( 'upload' => 1, 'reused' => 0, 'ignored' => 0 ),
+			'targets' => array( $retry_target ),
+		);
+		if ( str_contains( $url, '/uploads/resume' ) ) {
+			$expired_resumes++;
+			return 1 === $expired_resumes ? response( 503 ) : response( 200, array( 'upload' => $upload ) );
+		}
+		return response( 201, array( 'versionId' => 'ver_expired', 'upload' => $upload ) );
+	},
+	static function () use ( &$expired_uploads ): array {
+		$expired_uploads++;
+		return response( 1 === $expired_uploads ? 401 : 204 );
+	}
+);
+$expired_step = Spacefast_Static_Publisher::step( $archive, $expired_client );
+check( false === $expired_step['done'] && 1 === $expired_resumes, 'an expired upload session asks for fresh targets' );
+$expired_step = Spacefast_Static_Publisher::step( $archive, $expired_client );
+check( 2 === $expired_resumes && 1 === $expired_uploads, 'a failed refresh is retried before any stale target is sent again' );
+$expired_step = Spacefast_Static_Publisher::step( $archive, $expired_client );
+check( 2 === $expired_uploads && 1 === $expired_step['uploaded'], 'the refreshed target uploads' );
+
+Spacefast_Static_Publisher::reset();
 $rejecting_client = new Spacefast_Client(
 	static function ( string $url, array $args ) use ( $retry_target ): array {
 		return response(

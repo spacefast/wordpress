@@ -83,6 +83,11 @@ final class Spacefast_Static_Publisher {
 			}
 		}
 
+		// An expired upload session whose refresh failed transiently: refresh
+		// again before sending bytes on the stale targets.
+		if ( ! empty( $state['resume_pending'] ) ) {
+			return self::resume( $state, $client );
+		}
 		$upload = $state['upload'] ?? null;
 		if ( ! is_array( $upload ) ) {
 			return self::begin_finalizing( $state );
@@ -98,6 +103,7 @@ final class Spacefast_Static_Publisher {
 			$result = $client->upload_static_file( $target, $path );
 			if ( ! $result['ok'] ) {
 				if ( in_array( $result['code'], array( 'upload_http_401', 'upload_http_403' ), true ) ) {
+					$state['resume_pending'] = true;
 					return self::resume( $state, $client );
 				}
 				return self::retry_or_throw( $state, $result, 'uploading' );
@@ -220,6 +226,7 @@ final class Spacefast_Static_Publisher {
 			return self::retry_or_throw( $state, $result, 'uploading' );
 		}
 		$state['retries'] = 0;
+		$state['resume_pending'] = false;
 		$upload = $result['data']['upload'] ?? null;
 		if ( null !== $upload && ! is_array( $upload ) ) {
 			throw new RuntimeException( 'Spacefast returned invalid upload instructions.' );
