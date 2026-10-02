@@ -32,7 +32,7 @@ OAuth access is limited to the Team you authorize and the mode you choose. WordP
 == Changelog ==
 
 = 0.5.8 =
-* Retry transient upload, upload-refresh, and finalize failures in place instead of restarting the whole export as a new version.
+* Retry transient upload and upload-refresh failures in place, with exponential backoff for about four minutes, instead of restarting the whole export as a new version.
 * Once every file has uploaded, ask Spacefast which files it still lacks, upload any it names, and let that check trigger activation instead of depending on the upload-completion signal alone.
 
 = 0.5.7 =

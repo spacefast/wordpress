@@ -220,6 +220,12 @@ function response( int $status, array $data = array() ): array {
 	);
 }
 
+function skip_publish_retry_wait(): void {
+	$state = get_option( Spacefast_Static_Publisher::OPTION, array() );
+	$state['retry_at'] = 0;
+	update_option( Spacefast_Static_Publisher::OPTION, $state );
+}
+
 function paginated_response( array $data, ?string $next_cursor = null ): array {
 	return array(
 		'response' => array( 'code' => 200 ),
@@ -1125,6 +1131,11 @@ $retry_client = new Spacefast_Client(
 $retry_step = Spacefast_Static_Publisher::step( $archive, $retry_client );
 check( false === $retry_step['done'] && 0 === $retry_step['uploaded'], 'a transient upload failure keeps the publish running' );
 check( 'ver_retry' === $retry_step['version_id'], 'a transient upload failure keeps the same Spacefast version' );
+$retry_state = get_option( Spacefast_Static_Publisher::OPTION, array() );
+check( $retry_state['retry_at'] > time(), 'a transient failure schedules its retry instead of firing it at once' );
+$retry_step = Spacefast_Static_Publisher::step( $archive, $retry_client );
+check( 1 === $retry_uploads && 0 === $retry_step['uploaded'], 'a step inside the retry wait sends nothing' );
+skip_publish_retry_wait();
 $retry_step = Spacefast_Static_Publisher::step( $archive, $retry_client );
 check( 1 === $retry_step['uploaded'] && 2 === $retry_uploads, 'the next step retries the same upload target' );
 $retry_step = Spacefast_Static_Publisher::step( $archive, $retry_client );
@@ -1173,6 +1184,7 @@ $expired_client = new Spacefast_Client(
 );
 $expired_step = Spacefast_Static_Publisher::step( $archive, $expired_client );
 check( false === $expired_step['done'] && 1 === $expired_resumes, 'an expired upload session asks for fresh targets' );
+skip_publish_retry_wait();
 $expired_step = Spacefast_Static_Publisher::step( $archive, $expired_client );
 check( 2 === $expired_resumes && 1 === $expired_uploads, 'a failed refresh is retried before any stale target is sent again' );
 $expired_step = Spacefast_Static_Publisher::step( $archive, $expired_client );

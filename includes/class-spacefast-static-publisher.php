@@ -4,10 +4,12 @@ defined( 'ABSPATH' ) || exit;
 
 final class Spacefast_Static_Publisher {
 	const OPTION = 'spacefast_wordpress_publish_state';
-	// Consecutive transient failures tolerated before a publish gives up. Each
-	// retry is one background step, so a brief outage no longer restarts the
-	// whole export as a new version.
-	const MAX_TRANSIENT_RETRIES = 5;
+	// Consecutive transient failures tolerated before a publish gives up, with
+	// an exponential wait between them (2s doubling, capped at a minute, about
+	// four minutes in all). Simply Static runs background steps back to back,
+	// so without the wait every retry would land within the same second.
+	const MAX_TRANSIENT_RETRIES = 8;
+	const MAX_RETRY_DELAY_SECONDS = 60;
 
 	/**
 	 * Advance one bounded step of a Simply Static publish.
@@ -26,11 +28,21 @@ final class Spacefast_Static_Publisher {
 		$client = $client ?? new Spacefast_Client();
 		$state = get_option( self::OPTION, array() );
 		$state = is_array( $state ) ? $state : array();
-		if (
-			(string) ( $state['archive_dir'] ?? '' ) === $root
-			&& (string) ( $state['publish_mode'] ?? '' ) === $publish_mode
-			&& 'finalizing' === ( $state['phase'] ?? '' )
-		) {
+		$resuming = (string) ( $state['archive_dir'] ?? '' ) === $root
+			&& (string) ( $state['publish_mode'] ?? '' ) === $publish_mode;
+		$wait = (int) ( $state['retry_at'] ?? 0 ) - time();
+		if ( $resuming && $wait > 0 ) {
+			// Hold the background step briefly instead of spinning it.
+			sleep( min( $wait, 1 ) );
+			return array(
+				'done' => false,
+				'version_id' => (string) ( $state['version_id'] ?? '' ),
+				'uploaded' => (int) ( $state['uploaded'] ?? 0 ),
+				'total' => (int) ( $state['total'] ?? 0 ),
+				'status' => 'finalizing' === ( $state['phase'] ?? '' ) ? 'finalizing' : 'uploading',
+			);
+		}
+		if ( $resuming && 'finalizing' === ( $state['phase'] ?? '' ) ) {
 			return self::poll_version( $state, $client );
 		}
 
@@ -358,6 +370,7 @@ final class Spacefast_Static_Publisher {
 			throw new RuntimeException( $result['message'] );
 		}
 		$state['retries'] = $retries;
+		$state['retry_at'] = time() + min( self::MAX_RETRY_DELAY_SECONDS, 2 ** $retries );
 		update_option( self::OPTION, $state, false );
 		return array(
 			'done' => false,
