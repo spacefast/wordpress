@@ -4,6 +4,15 @@ defined( 'ABSPATH' ) || exit;
 
 final class Spacefast_Static_Publisher {
 	const OPTION = 'spacefast_wordpress_publish_state';
+	// Consecutive transient failures tolerated before a publish gives up, with
+	// an exponential wait between them (2s doubling, capped at a minute, about
+	// four minutes in all). Simply Static runs background steps back to back,
+	// so without the wait every retry would land within the same second.
+	const MAX_TRANSIENT_RETRIES = 8;
+	const MAX_RETRY_DELAY_SECONDS = 60;
+	// Upload rounds the completion check may request before the publish gives
+	// up on files the runtime keeps reporting as missing.
+	const MAX_COMPLETION_ROUNDS = 3;
 
 	/**
 	 * Advance one bounded step of a Simply Static publish.
@@ -22,11 +31,21 @@ final class Spacefast_Static_Publisher {
 		$client = $client ?? new Spacefast_Client();
 		$state = get_option( self::OPTION, array() );
 		$state = is_array( $state ) ? $state : array();
-		if (
-			(string) ( $state['archive_dir'] ?? '' ) === $root
-			&& (string) ( $state['publish_mode'] ?? '' ) === $publish_mode
-			&& 'finalizing' === ( $state['phase'] ?? '' )
-		) {
+		$resuming = (string) ( $state['archive_dir'] ?? '' ) === $root
+			&& (string) ( $state['publish_mode'] ?? '' ) === $publish_mode;
+		$wait = (int) ( $state['retry_at'] ?? 0 ) - time();
+		if ( $resuming && $wait > 0 ) {
+			// Hold the background step briefly instead of spinning it.
+			sleep( min( $wait, 1 ) );
+			return array(
+				'done' => false,
+				'version_id' => (string) ( $state['version_id'] ?? '' ),
+				'uploaded' => (int) ( $state['uploaded'] ?? 0 ),
+				'total' => (int) ( $state['total'] ?? 0 ),
+				'status' => 'finalizing' === ( $state['phase'] ?? '' ) ? 'finalizing' : 'uploading',
+			);
+		}
+		if ( $resuming && 'finalizing' === ( $state['phase'] ?? '' ) ) {
 			return self::poll_version( $state, $client );
 		}
 
@@ -79,6 +98,11 @@ final class Spacefast_Static_Publisher {
 			}
 		}
 
+		// An expired upload session whose refresh failed transiently: refresh
+		// again before sending bytes on the stale targets.
+		if ( ! empty( $state['resume_pending'] ) ) {
+			return self::resume( $state, $client );
+		}
 		$upload = $state['upload'] ?? null;
 		if ( ! is_array( $upload ) ) {
 			return self::begin_finalizing( $state );
@@ -94,10 +118,12 @@ final class Spacefast_Static_Publisher {
 			$result = $client->upload_static_file( $target, $path );
 			if ( ! $result['ok'] ) {
 				if ( in_array( $result['code'], array( 'upload_http_401', 'upload_http_403' ), true ) ) {
+					$state['resume_pending'] = true;
 					return self::resume( $state, $client );
 				}
-				throw new RuntimeException( $result['message'] );
+				return self::retry_or_throw( $state, $result, 'uploading' );
 			}
+			$state['retries'] = 0;
 			$state['next_target'] = $next_target + 1;
 			$state['uploaded'] = (int) ( $state['uploaded'] ?? 0 ) + 1;
 			update_option( self::OPTION, $state, false );
@@ -212,8 +238,10 @@ final class Spacefast_Static_Publisher {
 		}
 		$result = $client->resume_static_upload( (string) $state['version_id'] );
 		if ( ! $result['ok'] ) {
-			throw new RuntimeException( $result['message'] );
+			return self::retry_or_throw( $state, $result, 'uploading' );
 		}
+		$state['retries'] = 0;
+		$state['resume_pending'] = false;
 		$upload = $result['data']['upload'] ?? null;
 		if ( null !== $upload && ! is_array( $upload ) ) {
 			throw new RuntimeException( 'Spacefast returned invalid upload instructions.' );
@@ -261,6 +289,41 @@ final class Spacefast_Static_Publisher {
 		if ( $polls > 300 ) {
 			throw new RuntimeException( 'Spacefast did not finish publishing the version.' );
 		}
+		if ( empty( $state['completion_confirmed'] ) ) {
+			// Ask Spacefast which files it still lacks. When none are missing, the
+			// refresh runs the same completion the runtime's upload callback runs,
+			// so a lost callback cannot strand the version; when some are, upload
+			// them before waiting.
+			$refresh = $client->resume_static_upload( (string) $state['version_id'] );
+			if ( ! $refresh['ok'] && $refresh['retryable'] ) {
+				return self::retry_or_throw( $state, $refresh, 'finalizing' );
+			}
+			$missing = $refresh['ok'] ? ( $refresh['data']['upload'] ?? null ) : null;
+			if ( is_array( $missing ) && ! empty( $missing['targets'] ) ) {
+				$rounds = (int) ( $state['completion_rounds'] ?? 0 ) + 1;
+				if ( $rounds > self::MAX_COMPLETION_ROUNDS ) {
+					throw new RuntimeException( 'Spacefast kept reporting uploaded files as missing.' );
+				}
+				$state['completion_rounds'] = $rounds;
+				$state['phase'] = 'uploading';
+				$state['upload'] = $missing;
+				$state['next_target'] = 0;
+				$state['retries'] = 0;
+				update_option( self::OPTION, $state, false );
+				return array(
+					'done' => false,
+					'version_id' => (string) $state['version_id'],
+					'uploaded' => (int) $state['uploaded'],
+					'total' => (int) $state['total'],
+					'status' => 'uploading',
+				);
+			}
+			// A refusal means the version already left the draft states; the
+			// status poll below reports what it settled to.
+			$state['completion_confirmed'] = true;
+			$state['retries'] = 0;
+			update_option( self::OPTION, $state, false );
+		}
 		$result = $client->get_static_version( (string) $state['version_id'] );
 		if ( ! $result['ok'] ) {
 			if ( $result['retryable'] ) {
@@ -298,6 +361,31 @@ final class Spacefast_Static_Publisher {
 			'uploaded' => (int) $state['uploaded'],
 			'total' => (int) $state['total'],
 			'status' => 'finalizing',
+		);
+	}
+
+	/**
+	 * Keep the publish state and try the same step again on a transient failure,
+	 * up to MAX_TRANSIENT_RETRIES in a row. Anything else ends the publish.
+	 *
+	 * @param array<string,mixed> $state State.
+	 * @param array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>} $result Failed result.
+	 * @return array{done:bool,version_id:string,uploaded:int,total:int,status:string}
+	 */
+	private static function retry_or_throw( array $state, array $result, string $status ): array {
+		$retries = (int) ( $state['retries'] ?? 0 ) + 1;
+		if ( ! $result['retryable'] || $retries > self::MAX_TRANSIENT_RETRIES ) {
+			throw new RuntimeException( $result['message'] );
+		}
+		$state['retries'] = $retries;
+		$state['retry_at'] = time() + min( self::MAX_RETRY_DELAY_SECONDS, 2 ** $retries );
+		update_option( self::OPTION, $state, false );
+		return array(
+			'done' => false,
+			'version_id' => (string) ( $state['version_id'] ?? '' ),
+			'uploaded' => (int) ( $state['uploaded'] ?? 0 ),
+			'total' => (int) ( $state['total'] ?? 0 ),
+			'status' => $status,
 		);
 	}
 }
