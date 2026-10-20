@@ -7,6 +7,7 @@ delete_option( 'spacefast_wordpress_settings' );
 delete_option( 'spacefast_wordpress_sync_state' );
 delete_option( 'spacefast_wordpress_worker_lock' );
 delete_option( 'spacefast_wordpress_publish_state' );
+delete_option( 'spacefast_wordpress_publish_upload' );
 delete_option( 'spacefast_wordpress_oauth_pending' );
 delete_option( 'spacefast_wordpress_oauth_choices' );
 delete_option( 'spacefast_wordpress_space_creation' );

@@ -113,8 +113,66 @@ spacefast_accept(
 );
 
 $plugin = get_plugin_data( WP_PLUGIN_DIR . '/spacefast-wordpress/spacefast-wordpress.php', false, false );
-spacefast_accept( '0.5.8' === $plugin['Version'], 'Unexpected plugin version.' );
+spacefast_accept( '0.5.9' === $plugin['Version'], 'Unexpected plugin version.' );
 spacefast_accept( 'https://github.com/spacefast/wordpress' === $plugin['UpdateURI'], 'Update URI is missing.' );
+
+$archive = sys_get_temp_dir() . '/spacefast-acceptance-' . wp_generate_uuid4();
+mkdir( $archive );
+file_put_contents( $archive . '/index.html', '<h1>Acceptance</h1>' );
+$upload_calls = 0;
+$publish_client = new Spacefast_Client(
+	static function ( string $url, array $args ): array {
+		return array(
+			'response' => array( 'code' => 201 ),
+			'body' => wp_json_encode(
+				array(
+					'versionId' => 'ver_acceptance',
+					'upload' => array(
+						'summary' => array( 'upload' => 2 ),
+						'targets' => array_fill( 0, 2, array(
+							'path' => 'index.html',
+							'method' => 'PUT',
+							'url' => 'https://uploads.example.test/file',
+							'headers' => array( 'X-Signed' => str_repeat( 's', 1024 ) ),
+						) ),
+					),
+				)
+			),
+		);
+	},
+	static function () use ( &$upload_calls ): array {
+		$upload_calls++;
+		return array( 'response' => array( 'code' => 204 ), 'body' => '' );
+	}
+);
+Spacefast_Static_Publisher::reset();
+$publish_step = Spacefast_Static_Publisher::step( $archive, $publish_client );
+spacefast_accept( 1 === $publish_step['uploaded'], 'The first file did not upload.' );
+spacefast_accept( ! isset( get_option( Spacefast_Static_Publisher::OPTION )['upload'] ), 'Progress still contains signed targets.' );
+$upload_autoload = $wpdb->get_var( $wpdb->prepare(
+	"SELECT autoload FROM {$wpdb->options} WHERE option_name = %s",
+	Spacefast_Static_Publisher::UPLOAD_OPTION
+) );
+spacefast_accept( ! in_array( $upload_autoload, array( 'yes', 'on', 'auto-on' ), true ), 'Signed upload targets are autoloaded.' );
+
+$block_progress = static fn ( $value, $old_value ) => $old_value;
+add_filter( 'pre_update_option_' . Spacefast_Static_Publisher::OPTION, $block_progress, 10, 2 );
+$blocked = false;
+try {
+	Spacefast_Static_Publisher::step( $archive, $publish_client );
+} catch ( RuntimeException $error ) {
+	$blocked = str_contains( $error->getMessage(), 'blocked option updates' );
+}
+remove_filter( 'pre_update_option_' . Spacefast_Static_Publisher::OPTION, $block_progress, 10 );
+spacefast_accept( $blocked, 'A host-blocked progress write did not stop publishing.' );
+spacefast_accept( 1 === get_option( Spacefast_Static_Publisher::OPTION )['uploaded'], 'A blocked write incorrectly advanced the persisted cursor.' );
+$publish_step = Spacefast_Static_Publisher::step( $archive, $publish_client );
+spacefast_accept( 2 === $publish_step['uploaded'] && 3 === $upload_calls, 'Publishing did not resume from the last durable cursor.' );
+Spacefast_Static_Publisher::reset();
+spacefast_accept( false === get_option( Spacefast_Static_Publisher::UPLOAD_OPTION ), 'Reset retained signed upload targets.' );
+unlink( $archive . '/index.html' );
+unlink( $archive . '/sf.jsonc' );
+rmdir( $archive );
 
 Spacefast_Settings::disconnect();
 fwrite( STDOUT, "Spacefast WordPress container acceptance: PASS\n" );

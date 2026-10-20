@@ -74,6 +74,13 @@ function get_option( string $name, $default = false ) {
 	return $GLOBALS['spacefast_options'][ $name ] ?? $default;
 }
 function update_option( string $name, $value ): bool {
+	if ( ! empty( $GLOBALS['spacefast_blocked_options'][ $name ] ) ) {
+		return false;
+	}
+	if ( ( $GLOBALS['spacefast_options'][ $name ] ?? null ) === $value ) {
+		return false;
+	}
+	$GLOBALS['spacefast_option_writes'][ $name ][] = strlen( serialize( $value ) );
 	$GLOBALS['spacefast_options'][ $name ] = $value;
 	return true;
 }
@@ -1017,6 +1024,94 @@ check(
 	str_ends_with( $static_requests[3][3], '/assets/app.js' ),
 	'uploads the next opaque target after resuming'
 );
+
+$large_targets = array();
+for ( $i = 0; $i < 1000; $i++ ) {
+	$large_targets[] = array(
+		'path' => 'index.html',
+		'method' => 'PUT',
+		'url' => 'https://uploads.example.test/large-' . $i,
+		'headers' => array( 'X-Signed' => str_repeat( 's', 1024 ) ),
+	);
+}
+$large_upload = array( 'targets' => $large_targets, 'summary' => array( 'upload' => 1000 ) );
+$large_uploaded = array();
+$large_creates = 0;
+$large_client = new Spacefast_Client(
+	static function ( string $url, array $args ) use ( $large_upload, &$large_creates ): array {
+		if ( 'GET' === $args['method'] ) {
+			return response( 200, array( 'id' => 'ver_large', 'status' => 'ready', 'isCurrentProduction' => true ) );
+		}
+		if ( str_contains( $url, '/uploads/resume' ) ) {
+			return response( 200, array( 'upload' => null ) );
+		}
+		$large_creates++;
+		return response( 201, array( 'versionId' => 'ver_large', 'upload' => $large_upload ) );
+	},
+	static function ( string $url ) use ( &$large_uploaded ): array {
+		$large_uploaded[] = $url;
+		return response( 204 );
+	}
+);
+$GLOBALS['spacefast_option_writes'] = array();
+$large_step = Spacefast_Static_Publisher::step( $archive, $large_client );
+check( ! isset( get_option( Spacefast_Static_Publisher::OPTION )['upload'] ), 'large upload receipts are not embedded in progress checkpoints' );
+for ( $i = 1; $i < 1000; $i++ ) {
+	$large_step = Spacefast_Static_Publisher::step( $archive, $large_client );
+}
+check( 1000 === $large_step['uploaded'] && 1000 === count( array_unique( $large_uploaded ) ), 'separate background steps upload every large-page target exactly once' );
+$checkpoint_sizes = $GLOBALS['spacefast_option_writes'][ Spacefast_Static_Publisher::OPTION ];
+check( max( $checkpoint_sizes ) < 2048 && array_sum( $checkpoint_sizes ) < 2 * 1024 * 1024, 'per-file checkpoint write volume stays small for a megabyte receipt' );
+check( 1 === count( $GLOBALS['spacefast_option_writes'][ Spacefast_Static_Publisher::UPLOAD_OPTION ] ), 'a large target page is written only once, not after every file' );
+Spacefast_Static_Publisher::step( $archive, $large_client );
+check( null === get_option( Spacefast_Static_Publisher::UPLOAD_OPTION, null ), 'signed upload instructions are removed before polling' );
+check( Spacefast_Static_Publisher::step( $archive, $large_client )['done'], 'a large export completes after compact checkpointing' );
+check( null === get_option( Spacefast_Static_Publisher::OPTION, null ), 'completion removes the progress checkpoint' );
+
+$legacy_state = array(
+	'archive_dir' => $archive,
+	'publish_mode' => 'snapshot',
+	'version_id' => 'ver_large',
+	'upload' => $large_upload,
+	'phase' => 'uploading',
+	'next_target' => 998,
+	'uploaded' => 998,
+	'total' => 1000,
+);
+update_option( Spacefast_Static_Publisher::OPTION, $legacy_state );
+$legacy_step = Spacefast_Static_Publisher::step( $archive, $large_client );
+check( 999 === $legacy_step['uploaded'] && 1 === $large_creates, 'legacy inline state migrates without creating a new version or losing its cursor' );
+check( ! isset( get_option( Spacefast_Static_Publisher::OPTION )['upload'] ), 'migration removes the legacy inline receipt' );
+
+$GLOBALS['spacefast_blocked_options'][ Spacefast_Static_Publisher::OPTION ] = true;
+try {
+	Spacefast_Static_Publisher::step( $archive, $large_client );
+	check( false, 'blocked progress writes must stop publishing' );
+} catch ( RuntimeException $error ) {
+	check( str_contains( $error->getMessage(), 'blocked option updates' ), 'blocked writes report an actionable error instead of repeating an upload indefinitely' );
+}
+$GLOBALS['spacefast_blocked_options'] = array();
+Spacefast_Static_Publisher::reset();
+check( null === get_option( Spacefast_Static_Publisher::UPLOAD_OPTION, null ), 'reset removes the separate upload page' );
+$legacy_state['resume_pending'] = true;
+update_option( Spacefast_Static_Publisher::OPTION, $legacy_state );
+$uploads_before_migration = count( $large_uploaded );
+$migrated_pending = Spacefast_Static_Publisher::step( $archive, $large_client );
+check( $uploads_before_migration === count( $large_uploaded ) && 'finalizing' === $migrated_pending['status'], 'legacy migration preserves a pending refresh instead of sending expired targets' );
+Spacefast_Static_Publisher::reset();
+$GLOBALS['spacefast_blocked_options'][ Spacefast_Static_Publisher::UPLOAD_OPTION ] = true;
+$uploads_before_block = count( $large_uploaded );
+try {
+	Spacefast_Static_Publisher::step( $archive, $large_client );
+	check( false, 'blocked target-page writes must stop publishing' );
+} catch ( RuntimeException $error ) {
+	check( $uploads_before_block === count( $large_uploaded ), 'a target-page save failure stops before any file uploads' );
+	check( true === get_option( Spacefast_Static_Publisher::OPTION )['resume_pending'], 'an interrupted page replacement retains a durable refresh checkpoint' );
+}
+$GLOBALS['spacefast_blocked_options'] = array();
+Spacefast_Static_Publisher::step( $archive, $large_client );
+check( $uploads_before_block === count( $large_uploaded ), 'an interrupted page replacement refreshes instead of reusing stale targets' );
+Spacefast_Static_Publisher::reset();
 
 Spacefast_Sync_State::save(
 	array_merge( Spacefast_Sync_State::defaults(), array( 'desired' => 2, 'active_generation' => 1 ) )
