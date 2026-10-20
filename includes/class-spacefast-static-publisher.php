@@ -4,6 +4,7 @@ defined( 'ABSPATH' ) || exit;
 
 final class Spacefast_Static_Publisher {
 	const OPTION = 'spacefast_wordpress_publish_state';
+	const UPLOAD_OPTION = 'spacefast_wordpress_publish_upload';
 	// Consecutive transient failures tolerated before a publish gives up, with
 	// an exponential wait between them (2s doubling, capped at a minute, about
 	// four minutes in all). Simply Static runs background steps back to back,
@@ -31,6 +32,11 @@ final class Spacefast_Static_Publisher {
 		$client = $client ?? new Spacefast_Client();
 		$state = get_option( self::OPTION, array() );
 		$state = is_array( $state ) ? $state : array();
+		if ( array_key_exists( 'upload', $state ) ) {
+			self::save_upload( $state );
+		} else {
+			$state['upload'] = get_option( self::UPLOAD_OPTION, null );
+		}
 		$resuming = (string) ( $state['archive_dir'] ?? '' ) === $root
 			&& (string) ( $state['publish_mode'] ?? '' ) === $publish_mode;
 		$wait = (int) ( $state['retry_at'] ?? 0 ) - time();
@@ -61,7 +67,7 @@ final class Spacefast_Static_Publisher {
 			}
 			$version_id = (string) ( $result['data']['versionId'] ?? '' );
 			if ( '' === $version_id ) {
-				delete_option( self::OPTION );
+				self::reset();
 				return array(
 					'done' => true,
 					'version_id' => '',
@@ -92,7 +98,7 @@ final class Spacefast_Static_Publisher {
 				'pages' => 0,
 				'polls' => 0,
 			);
-			update_option( self::OPTION, $state, false );
+			self::save_upload( $state );
 			if ( null === $upload ) {
 				return self::begin_finalizing( $state );
 			}
@@ -126,7 +132,7 @@ final class Spacefast_Static_Publisher {
 			$state['retries'] = 0;
 			$state['next_target'] = $next_target + 1;
 			$state['uploaded'] = (int) ( $state['uploaded'] ?? 0 ) + 1;
-			update_option( self::OPTION, $state, false );
+			self::save_state( $state );
 			return array(
 				'done' => false,
 				'version_id' => (string) $state['version_id'],
@@ -187,6 +193,30 @@ final class Spacefast_Static_Publisher {
 
 	public static function reset(): void {
 		delete_option( self::OPTION );
+		delete_option( self::UPLOAD_OPTION );
+	}
+
+	private static function save_upload( array &$state ): void {
+		// A crash between the receipt and cursor writes must refresh the page,
+		// never apply the previous page's cursor to the replacement targets.
+		$state['resume_pending'] = true;
+		self::save_state( $state );
+		self::save_option( self::UPLOAD_OPTION, $state['upload'] );
+		$state['resume_pending'] = false;
+		self::save_state( $state );
+	}
+
+	private static function save_state( array $state ): void {
+		// Signed target pages can be megabytes. Per-file checkpoints must not
+		// rewrite them or Atomic's single-option write limiter blocks progress.
+		unset( $state['upload'] );
+		self::save_option( self::OPTION, $state );
+	}
+
+	private static function save_option( string $name, $value ): void {
+		if ( ! update_option( $name, $value, false ) && get_option( $name, null ) !== $value ) {
+			throw new RuntimeException( 'Spacefast could not save publish progress. Ask your hosting support to check for blocked option updates before retrying.' );
+		}
 	}
 
 	private static function ensure_public_config( string $root ): void {
@@ -252,7 +282,7 @@ final class Spacefast_Static_Publisher {
 		$state['upload'] = $upload;
 		$state['next_target'] = 0;
 		$state['pages'] = $pages;
-		update_option( self::OPTION, $state, false );
+		self::save_upload( $state );
 		return array(
 			'done' => false,
 			'version_id' => (string) $state['version_id'],
@@ -270,7 +300,8 @@ final class Spacefast_Static_Publisher {
 		$state['phase'] = 'finalizing';
 		$state['upload'] = null;
 		$state['polls'] = 0;
-		update_option( self::OPTION, $state, false );
+		self::save_state( $state );
+		delete_option( self::UPLOAD_OPTION );
 		return array(
 			'done' => false,
 			'version_id' => (string) ( $state['version_id'] ?? '' ),
@@ -309,7 +340,7 @@ final class Spacefast_Static_Publisher {
 				$state['upload'] = $missing;
 				$state['next_target'] = 0;
 				$state['retries'] = 0;
-				update_option( self::OPTION, $state, false );
+				self::save_upload( $state );
 				return array(
 					'done' => false,
 					'version_id' => (string) $state['version_id'],
@@ -322,13 +353,13 @@ final class Spacefast_Static_Publisher {
 			// status poll below reports what it settled to.
 			$state['completion_confirmed'] = true;
 			$state['retries'] = 0;
-			update_option( self::OPTION, $state, false );
+			self::save_state( $state );
 		}
 		$result = $client->get_static_version( (string) $state['version_id'] );
 		if ( ! $result['ok'] ) {
 			if ( $result['retryable'] ) {
 				$state['polls'] = $polls;
-				update_option( self::OPTION, $state, false );
+				self::save_state( $state );
 				return array(
 					'done' => false,
 					'version_id' => (string) $state['version_id'],
@@ -341,7 +372,7 @@ final class Spacefast_Static_Publisher {
 		}
 		$status = (string) ( $result['data']['status'] ?? '' );
 		if ( 'ready' === $status ) {
-			delete_option( self::OPTION );
+			self::reset();
 			return array(
 				'done' => true,
 				'version_id' => (string) $state['version_id'],
@@ -354,7 +385,7 @@ final class Spacefast_Static_Publisher {
 			throw new RuntimeException( 'Spacefast could not publish the generated version.' );
 		}
 		$state['polls'] = $polls;
-		update_option( self::OPTION, $state, false );
+		self::save_state( $state );
 		return array(
 			'done' => false,
 			'version_id' => (string) $state['version_id'],
@@ -379,7 +410,7 @@ final class Spacefast_Static_Publisher {
 		}
 		$state['retries'] = $retries;
 		$state['retry_at'] = time() + min( self::MAX_RETRY_DELAY_SECONDS, 2 ** $retries );
-		update_option( self::OPTION, $state, false );
+		self::save_state( $state );
 		return array(
 			'done' => false,
 			'version_id' => (string) ( $state['version_id'] ?? '' ),
