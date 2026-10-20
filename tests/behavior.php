@@ -1093,6 +1093,12 @@ try {
 $GLOBALS['spacefast_blocked_options'] = array();
 Spacefast_Static_Publisher::reset();
 check( null === get_option( Spacefast_Static_Publisher::UPLOAD_OPTION, null ), 'reset removes the separate upload page' );
+$legacy_state['resume_pending'] = true;
+update_option( Spacefast_Static_Publisher::OPTION, $legacy_state );
+$uploads_before_migration = count( $large_uploaded );
+$migrated_pending = Spacefast_Static_Publisher::step( $archive, $large_client );
+check( $uploads_before_migration === count( $large_uploaded ) && 'finalizing' === $migrated_pending['status'], 'legacy migration preserves a pending refresh instead of sending expired targets' );
+Spacefast_Static_Publisher::reset();
 $GLOBALS['spacefast_blocked_options'][ Spacefast_Static_Publisher::UPLOAD_OPTION ] = true;
 $uploads_before_block = count( $large_uploaded );
 try {

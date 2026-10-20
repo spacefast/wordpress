@@ -33,7 +33,7 @@ final class Spacefast_Static_Publisher {
 		$state = get_option( self::OPTION, array() );
 		$state = is_array( $state ) ? $state : array();
 		if ( array_key_exists( 'upload', $state ) ) {
-			self::save_upload( $state );
+			self::save_upload( $state, ! empty( $state['resume_pending'] ) );
 		} else {
 			$state['upload'] = get_option( self::UPLOAD_OPTION, null );
 		}
@@ -196,13 +196,13 @@ final class Spacefast_Static_Publisher {
 		delete_option( self::UPLOAD_OPTION );
 	}
 
-	private static function save_upload( array &$state ): void {
+	private static function save_upload( array &$state, bool $resume_pending = false ): void {
 		// A crash between the receipt and cursor writes must refresh the page,
 		// never apply the previous page's cursor to the replacement targets.
 		$state['resume_pending'] = true;
 		self::save_state( $state );
 		self::save_option( self::UPLOAD_OPTION, $state['upload'] );
-		$state['resume_pending'] = false;
+		$state['resume_pending'] = $resume_pending;
 		self::save_state( $state );
 	}
 
