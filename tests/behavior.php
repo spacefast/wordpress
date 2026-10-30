@@ -465,7 +465,7 @@ Spacefast_Sync_State::save(
 $connection_requests = array();
 $GLOBALS['spacefast_remote_handler'] = static function ( string $url, array $args ) use ( &$connection_requests ): array {
 	$connection_requests[] = array( $url, $args );
-	if ( 'POST' === $args['method'] && str_ends_with( $url, '/builds/wordpress' ) ) {
+	if ( 'POST' === $args['method'] && str_ends_with( $url, '/builds' ) ) {
 		return response( 201, array( 'build' => array( 'id' => 'bld_new_space', 'status' => 'queued' ) ) );
 	}
 	return response( 200, array( 'ready' => true ) );
@@ -783,6 +783,11 @@ $transport = static function ( string $url, array $args ) use ( &$requests ) {
 $result = ( new Spacefast_Client( $transport ) )->trigger_build( 'wp-event-123' );
 check( true === $result['ok'], 'healthy connection triggers a build' );
 check( 2 === count( $requests ), 'verifies the source before the build' );
+check(
+	Spacefast_Settings::api_url() . '/v1/spaces/spc_demo/builds/preflight?source=wordpress&sourceUrl=https%3A%2F%2Fwp.example.test' === $requests[0][0]
+		&& 'GET' === $requests[0][1]['method'],
+	'checks the WordPress source through build preflight'
+);
 $build_request = $requests[1][1];
 check(
 	'wp-event-123' === $build_request['headers']['Idempotency-Key'],
@@ -790,11 +795,12 @@ check(
 );
 $build_body = json_decode( $build_request['body'], true );
 check(
-	'https://wp.example.test' === $build_body['sourceUrl'],
-	'sends only the configured WordPress source'
+	array( 'source' => 'wordpress', 'sourceUrl' => 'https://wp.example.test' ) === $build_body,
+	'names the managed WordPress source and nothing else'
 );
 check(
-	str_ends_with( $requests[1][0], '/builds/wordpress' ),
+	Spacefast_Settings::api_url() . '/v1/spaces/spc_demo/builds' === $requests[1][0]
+		&& 'POST' === $build_request['method'],
 	'uses the constrained server-side trigger'
 );
 check(
@@ -932,9 +938,9 @@ $static_client = new Spacefast_Client(
 				)
 			);
 		}
-		if ( str_contains( $url, '/uploads/resume' ) ) {
+		if ( str_contains( $url, '/uploads/refresh' ) ) {
 			// The completion check after the last page finds nothing missing.
-			if ( count( array_filter( $static_requests, static fn ( array $request ): bool => str_contains( $request[0], '/uploads/resume' ) ) ) > 1 ) {
+			if ( count( array_filter( $static_requests, static fn ( array $request ): bool => str_contains( $request[0], '/uploads/refresh' ) ) ) > 1 ) {
 				return response( 200, array( 'upload' => null ) );
 			}
 			return response(
@@ -953,7 +959,7 @@ $static_client = new Spacefast_Client(
 								'headers' => array( 'X-Upload' => 'signed-2' ),
 							),
 						),
-						'links' => array( 'resume' => '/resume', 'finalize' => '/finalize' ),
+						'links' => array( 'refresh' => '/refresh', 'finalize' => '/finalize' ),
 					),
 				)
 			);
@@ -975,7 +981,7 @@ $static_client = new Spacefast_Client(
 							'headers' => array( 'X-Upload' => 'signed' ),
 						),
 					),
-					'links' => array( 'resume' => '/resume', 'finalize' => '/finalize' ),
+					'links' => array( 'refresh' => '/refresh', 'finalize' => '/finalize' ),
 				),
 			)
 		);
@@ -1016,6 +1022,11 @@ check(
 check(
 	str_ends_with( $static_requests[3][3], '/assets/app.js' ),
 	'uploads the next opaque target after resuming'
+);
+check(
+	Spacefast_Settings::api_url() . '/v1/spaces/spc_demo/versions/ver_static/uploads/refresh' === $static_requests[2][0]
+		&& 'POST' === $static_requests[2][1]['method'],
+	'pages upload instructions through the version upload refresh'
 );
 
 Spacefast_Sync_State::save(
@@ -1109,7 +1120,7 @@ $retry_client = new Spacefast_Client(
 		if ( 'GET' === $args['method'] ) {
 			return response( 200, array( 'id' => 'ver_retry', 'status' => 'ready', 'isCurrentProduction' => true ) );
 		}
-		if ( str_contains( $url, '/uploads/resume' ) ) {
+		if ( str_contains( $url, '/uploads/refresh' ) ) {
 			return response( 200, array( 'upload' => null ) );
 		}
 		return response(
@@ -1148,7 +1159,7 @@ $retry_creates = array_filter(
 );
 $retry_confirms = array_filter(
 	$retry_requests,
-	static fn ( array $request ): bool => str_contains( $request[0], '/versions/ver_retry/uploads/resume' )
+	static fn ( array $request ): bool => str_contains( $request[0], '/versions/ver_retry/uploads/refresh' )
 );
 $retry_finalizes = array_filter(
 	$retry_requests,
@@ -1170,7 +1181,7 @@ $expired_client = new Spacefast_Client(
 			'summary' => array( 'upload' => 1, 'reused' => 0, 'ignored' => 0 ),
 			'targets' => array( $retry_target ),
 		);
-		if ( str_contains( $url, '/uploads/resume' ) ) {
+		if ( str_contains( $url, '/uploads/refresh' ) ) {
 			$expired_resumes++;
 			if ( 1 === $expired_resumes ) return response( 503 );
 			return response( 200, array( 'upload' => 2 === $expired_resumes ? $upload : null ) );
@@ -1202,7 +1213,7 @@ $missing_client = new Spacefast_Client(
 			'summary' => array( 'upload' => 1, 'reused' => 0, 'ignored' => 0 ),
 			'targets' => array( $retry_target ),
 		);
-		if ( str_contains( $url, '/uploads/resume' ) ) {
+		if ( str_contains( $url, '/uploads/refresh' ) ) {
 			$missing_resumes++;
 			return response( 200, array( 'upload' => 1 === $missing_resumes ? $upload : null ) );
 		}
@@ -1227,7 +1238,7 @@ $stuck_client = new Spacefast_Client(
 			'summary' => array( 'upload' => 1, 'reused' => 0, 'ignored' => 0 ),
 			'targets' => array( $retry_target ),
 		);
-		if ( str_contains( $url, '/uploads/resume' ) ) {
+		if ( str_contains( $url, '/uploads/refresh' ) ) {
 			return response( 200, array( 'upload' => $upload ) );
 		}
 		return response( 201, array( 'versionId' => 'ver_stuck', 'upload' => $upload ) );
