@@ -236,7 +236,7 @@ final class Spacefast_Static_Publisher {
 		if ( $pages > 10000 ) {
 			throw new RuntimeException( 'Spacefast returned too many upload instruction pages.' );
 		}
-		$result = $client->resume_static_upload( (string) $state['version_id'] );
+		$result = $client->refresh_static_upload( (string) $state['version_id'] );
 		if ( ! $result['ok'] ) {
 			return self::retry_or_throw( $state, $result, 'uploading' );
 		}
@@ -294,7 +294,7 @@ final class Spacefast_Static_Publisher {
 			// refresh runs the same completion the runtime's upload callback runs,
 			// so a lost callback cannot strand the version; when some are, upload
 			// them before waiting.
-			$refresh = $client->resume_static_upload( (string) $state['version_id'] );
+			$refresh = $client->refresh_static_upload( (string) $state['version_id'] );
 			if ( ! $refresh['ok'] && $refresh['retryable'] ) {
 				return self::retry_or_throw( $state, $refresh, 'finalizing' );
 			}

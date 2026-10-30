@@ -204,7 +204,7 @@ final class Spacefast_Client {
 		$source_url = rawurlencode( untrailingslashit( home_url() ) );
 		return $this->request(
 			'GET',
-			"/v1/spaces/{$space_id}/builds/wordpress?sourceUrl={$source_url}"
+			"/v1/spaces/{$space_id}/builds/preflight?source=wordpress&sourceUrl={$source_url}"
 		);
 	}
 
@@ -230,8 +230,9 @@ final class Spacefast_Client {
 		$settings = Spacefast_Settings::get();
 		$result = $this->request(
 			'POST',
-			'/v1/spaces/' . rawurlencode( $settings['space_id'] ) . '/builds/wordpress',
+			'/v1/spaces/' . rawurlencode( $settings['space_id'] ) . '/builds',
 			array(
+				'source' => 'wordpress',
 				'sourceUrl' => untrailingslashit( home_url() ),
 			),
 			array( 'Idempotency-Key' => $event_id )
@@ -300,12 +301,12 @@ final class Spacefast_Client {
 	/**
 	 * @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>}
 	 */
-	public function resume_static_upload( string $version_id ): array {
+	public function refresh_static_upload( string $version_id ): array {
 		$settings = Spacefast_Settings::get();
 		return $this->request(
 			'POST',
 			'/v1/spaces/' . rawurlencode( $settings['space_id'] ) . '/versions/'
-				. rawurlencode( $version_id ) . '/uploads/resume'
+				. rawurlencode( $version_id ) . '/uploads/refresh'
 		);
 	}
 
