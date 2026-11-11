@@ -42,7 +42,7 @@ OAuth access is limited to the Team you authorize and the mode you choose. WordP
 * Make static WordPress exports publicly readable by default while preserving an explicit sf.jsonc access policy.
 
 = 0.5.5 =
-* Declare and send each exported file's media type so managed hosting accepts binary uploads.
+* Declare and send each exported file's media type so Spacefast accepts binary uploads.
 
 = 0.5.4 =
 * Treat repeated same-second upload progress as a successful no-op instead of a sync-state conflict.
