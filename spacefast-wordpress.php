@@ -3,7 +3,7 @@
  * Plugin Name: Spacefast
  * Plugin URI: https://spacefast.com/
  * Description: Publishes static WordPress exports or rebuilds a headless Spacefast site.
- * Version: 0.5.8
+ * Version: 0.6.0
  * Update URI: https://github.com/spacefast/wordpress
  * Requires at least: 6.5
  * Requires PHP: 8.1
@@ -14,7 +14,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'SPACEFAST_WORDPRESS_VERSION', '0.5.8' );
+define( 'SPACEFAST_WORDPRESS_VERSION', '0.6.0' );
 define( 'SPACEFAST_WORDPRESS_FILE', __FILE__ );
 
 require_once __DIR__ . '/includes/class-spacefast-settings.php';
@@ -24,6 +24,10 @@ require_once __DIR__ . '/includes/class-spacefast-oauth.php';
 require_once __DIR__ . '/includes/class-spacefast-client.php';
 require_once __DIR__ . '/includes/class-spacefast-static-publisher.php';
 require_once __DIR__ . '/includes/class-spacefast-plugin.php';
+
+if ( defined( 'WP_CLI' ) && WP_CLI ) {
+	require_once __DIR__ . '/includes/class-spacefast-cli.php';
+}
 
 register_activation_hook( __FILE__, array( 'Spacefast_Plugin', 'activate' ) );
 register_deactivation_hook( __FILE__, array( 'Spacefast_Plugin', 'deactivate' ) );

@@ -83,6 +83,42 @@ Automatic publishing is on by default. Site and content changes share the same
 60-second quiet window, and settings are synced immediately before the next
 publish or build. These defaults can be changed under **WordPress sync**.
 
+## Command line
+
+After connecting a Team and Space in **Settings → Spacefast**, run these commands
+from your WordPress installation:
+
+```bash
+wp spacefast status
+wp spacefast status --format=json
+wp spacefast publish --wait --timeout=600
+wp spacefast build --wait
+wp spacefast sync-settings
+wp spacefast disconnect --yes
+```
+
+`publish` starts a full Simply Static export in Static WordPress mode. With
+`--wait`, the free Simply Static worker runs its queued tasks inline, including
+Spacefast delivery, without WP-Cron or loopback AJAX. It waits for the requested
+version to become live (or an unchanged export). `build` starts a production
+repository build in Headless CMS mode; `--wait` waits for the requested build to
+succeed, including a queued successor if another build was already running.
+Without `--wait`, both commands return after requesting background delivery.
+
+The default wait limit is 600 seconds. `publish --timeout=<s>` accepts a positive
+integer and sets that limit; it is checked between tasks and HTTP requests, so an
+in-flight step may finish after the deadline. Failure or timeout exits non-zero.
+Timeout leaves queued work available to the normal background worker. Paused or
+canceled exports fail the wait. Custom Simply Static workers must support the
+inline adapter; unsupported workers report an error before starting a wait.
+
+`status` reports local connection, mode, Team, Space, live URL, version/build
+receipts, delivery state, and whether changes remain pending. JSON output is a
+single object and never includes OAuth credentials. Status does not refresh the
+remote state. `sync-settings` honors the WordPress sync preferences for title,
+description, search visibility, and the headless source. `disconnect` prompts
+unless `--yes` is supplied. Use WP-CLI's `--url=<site>` to select a multisite site.
+
 ## Operate and remove
 
 The settings page leads with the authoritative live/publishing state, live URL,

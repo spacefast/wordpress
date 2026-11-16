@@ -3,7 +3,7 @@ Contributors: spacefast
 Tags: static site, headless cms, simply static, deployment
 Requires at least: 6.5
 Requires PHP: 8.1
-Stable tag: 0.5.8
+Stable tag: 0.6.0
 License: GPLv2 or later
 
 Publish a Simply Static export to Spacefast, or rebuild a headless site when WordPress content changes.
@@ -25,11 +25,32 @@ Both modes include a manual action in Settings > Spacefast. Headless repository 
 4. Back in WordPress, create a Space with the suggested name or choose an existing one.
 5. Wait for the first version to publish. The plugin shows the live URL when it is ready.
 
+== Command line ==
+
+Connect a Team and Space under Settings > Spacefast first, then use WP-CLI:
+
+* `wp spacefast status [--format=table|json]` reports local connection and delivery state without credentials.
+* `wp spacefast publish [--wait] [--timeout=600]` starts a full Simply Static export in Static WordPress mode.
+* `wp spacefast build [--wait]` requests a production repository build in Headless CMS mode.
+* `wp spacefast sync-settings` pushes the settings enabled under WordPress sync.
+* `wp spacefast disconnect [--yes]` revokes refresh access and clears the local connection.
+
+With --wait, export tasks run inline using free Simply Static, without WP-Cron.
+Publish waits for a live version or an unchanged export; build waits for success.
+Both wait up to 600 seconds by default and exit non-zero on failure or timeout.
+Publish accepts a positive integer timeout, checked between tasks and HTTP requests.
+Timed-out work may continue in the background. Status reports saved state without
+contacting Spacefast. Use --url=<site> to select a site on multisite.
+
 == Security ==
 
 OAuth access is limited to the Team you authorize and the mode you choose. WordPress syncs only the selected Space and waits for a real first publish or build before showing the connection as complete. Tokens are stored in non-autoloaded options and are never displayed.
 
 == Changelog ==
+
+= 0.6.0 =
+* Add wp spacefast status, publish, build, sync-settings, and disconnect commands.
+* Share manual delivery actions with wp-admin and support bounded CLI waits with inline Simply Static processing.
 
 = 0.5.8 =
 * Retry transient upload and upload-refresh failures in place, with exponential backoff for about four minutes, instead of restarting the whole export as a new version.
