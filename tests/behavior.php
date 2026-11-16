@@ -33,6 +33,45 @@ function untrailingslashit( string $value ): string {
 function __( string $value ): string {
 	return $value;
 }
+function esc_html__( string $value ): string {
+	return htmlspecialchars( $value );
+}
+function esc_html( string $value ): string {
+	return htmlspecialchars( $value );
+}
+function esc_html_e( string $value ): void {
+	echo esc_html( $value );
+}
+function esc_attr( string $value ): string {
+	return htmlspecialchars( $value, ENT_QUOTES );
+}
+function esc_attr_e( string $value ): void {
+	echo esc_attr( $value );
+}
+function esc_url( string $value ): string {
+	return esc_attr( $value );
+}
+function wp_nonce_field( string $action ): void {
+	echo '<input name="_wpnonce" value="' . esc_attr( $action ) . '">';
+}
+function wp_date( string $format, int $timestamp ): string {
+	return date( $format, $timestamp );
+}
+function current_user_can( string $capability ): bool {
+	return in_array( $capability, $GLOBALS['spacefast_test_caps'] ?? array( 'manage_options' ), true );
+}
+function apply_filters( string $hook, $value ) {
+	return isset( $GLOBALS['spacefast_test_filters'][ $hook ] ) ? $GLOBALS['spacefast_test_filters'][ $hook ]( $value ) : $value;
+}
+function check_admin_referer( string $action ): void {
+	if ( ( $_POST['_wpnonce'] ?? '' ) !== $action ) throw new RuntimeException( 'Invalid nonce' );
+}
+function wp_unslash( string $value ): string {
+	return stripslashes( $value );
+}
+function wp_die( string $message, $title = '' ): void {
+	throw new RuntimeException( $message );
+}
 function sanitize_text_field( string $value ): string {
 	return trim( strip_tags( $value ) );
 }
@@ -45,8 +84,8 @@ function add_action( string $hook, $callback, int $priority = 10, int $accepted_
 function add_filter( string $hook, $callback, int $priority = 10, int $accepted_args = 1 ): void {
 	$GLOBALS['spacefast_hooks'][ $hook ] = array( $callback, $priority, $accepted_args );
 }
-function wp_parse_url( string $value ) {
-	return parse_url( $value );
+function wp_parse_url( string $value, int $component = -1 ) {
+	return parse_url( $value, $component );
 }
 function wp_check_filetype( string $path ): array {
 	return array(
@@ -162,6 +201,11 @@ function wp_safe_remote_request( string $url, array $args ) {
 }
 
 final class Spacefast_Test_Wp_Error {}
+final class WP_Error {
+	public function __construct( string $code, string $message ) {
+		throw new RuntimeException( $code . ': ' . $message );
+	}
+}
 final class Spacefast_Test_Wpdb {
 	public string $options = 'wp_options';
 
@@ -252,7 +296,7 @@ Spacefast_Plugin::boot();
 check( isset( $GLOBALS['spacefast_hooks']['update_option_home'] ), 'changing the WordPress Site Address queues settings sync' );
 
 check(
-	array( 'teams:read', 'spaces:read', 'spaces:write', 'spaces:publish', 'offline_access' ) === Spacefast_OAuth::scopes( Spacefast_Settings::MODE_STATIC ),
+	array( 'teams:read', 'spaces:read', 'spaces:write', 'publish:write', 'offline_access' ) === Spacefast_OAuth::scopes( Spacefast_Settings::MODE_STATIC ),
 	'static OAuth asks for Team discovery, Space creation and discovery, publishing, and refresh access'
 );
 check(
@@ -550,6 +594,18 @@ unset( $GLOBALS['spacefast_cache_enabled'][ Spacefast_Sync_State::OPTION ] );
 unset( $GLOBALS['spacefast_cached_options'][ Spacefast_Sync_State::OPTION ] );
 $unchanged_state = Spacefast_Sync_State::mutate( static fn( array $current ): array => $current );
 check( $cas_ack === $unchanged_state, 'an unchanged journal transition succeeds without becoming a false CAS conflict' );
+$journal_before_upgrade = $GLOBALS['spacefast_options'][ Spacefast_Sync_State::OPTION ];
+// State saved by 0.5.x has none of the review keys added since.
+$GLOBALS['spacefast_options'][ Spacefast_Sync_State::OPTION ] = array_diff_key(
+	$cas_ack,
+	array_flip( array( 'staged_version_id', 'staged_publish_mode', 'active_review', 'active_source', 'pending_source', 'version_sources' ) )
+);
+$upgraded = Spacefast_Sync_State::mutate(
+	static fn( array $current ): array => Spacefast_Sync_State::record_change( $current, 'post_publish', 'event-upgrade' )
+);
+check( 3 === $upgraded['desired'] && 'auto' === $upgraded['pending_source'], 'state saved by an earlier release still accepts transitions' );
+check( 'event-upgrade' === $GLOBALS['spacefast_options'][ Spacefast_Sync_State::OPTION ]['event_id'], 'upgraded state is written back with the new keys' );
+$GLOBALS['spacefast_options'][ Spacefast_Sync_State::OPTION ] = $journal_before_upgrade;
 
 $invalid_response = new Spacefast_Client(
 	static fn(): array => array(
@@ -1043,12 +1099,14 @@ check( 'live' === $fallback_static_ack['last_status'], 'a missing exporter start
 
 eval(
 	'namespace Simply_Static {
-		class Task {}
+		class Task { public function save_status_message($message) {} }
 		class Options {
 			private static $instance;
 			public static function instance() { return self::$instance ??= new self(); }
 			public function set($key, $value) { return $this; }
 			public function save() { return true; }
+			public function get($key) { return $GLOBALS["spacefast_simply_options"][$key] ?? null; }
+			public function get_archive_dir() { return $GLOBALS["spacefast_simply_archive"]; }
 		}
 		class Plugin {
 			public static $runs = 0;
@@ -1269,6 +1327,221 @@ try {
 check( $rejected, 'a rejected upload still ends the publish' );
 Spacefast_Static_Publisher::reset();
 
+// Staging keeps the legacy live payload identical and pins the channel while resuming.
+Spacefast_Settings::merge( array_merge( $static_connection, array( 'scope' => 'teams:read spaces:read spaces:write publish:write offline_access', 'review_before_live' => true ) ) );
+$version_requests = array();
+$version_failure = false;
+$version_live = false;
+$version_client = new Spacefast_Client(
+	static function ( string $url, array $args ) use ( &$version_requests, &$version_failure, &$version_live ): array {
+		$version_requests[] = array( $url, $args );
+		if ( $version_failure ) return response( 403, array() );
+		if ( 'DELETE' === $args['method'] ) return array( 'response' => array( 'code' => 204 ), 'body' => '' );
+		if ( str_ends_with( $url, '/preview-session' ) ) return response( 200, array( 'url' => 'https://preview.example.test/?proof=private', 'expiresAt' => '2026-11-16T20:10:00Z' ) );
+		if ( str_ends_with( $url, '/promote' ) ) return response( 200, array( 'id' => 'ver_promoted', 'status' => 'ready', 'isCurrentProduction' => true ) );
+		if ( str_ends_with( $url, '/versions' ) ) return response( 201, array( 'versionId' => 'ver_staged', 'upload' => null ) );
+		if ( str_contains( $url, '/versions?' ) ) return response( 200, array() );
+		return response( 200, array( 'id' => 'ver_staged', 'status' => 'ready', 'isCurrentProduction' => $version_live ) );
+	}
+);
+$version_client->create_static_version( $manifest, 'event-legacy', 'snapshot' );
+check( $version_requests[0][1]['body'] === $static_requests[0][1]['body'], 'toggle off preserves the legacy create request byte for byte' );
+$version_requests = array();
+Spacefast_Static_Publisher::step( $archive, $version_client, 'additive', null );
+$staged_body = json_decode( $version_requests[0][1]['body'], true );
+check( array_key_exists( 'channel', $staged_body['finalize'] ) && null === $staged_body['finalize']['channel'], 'staging explicitly serializes channel as null' );
+check( 'additive' === $staged_body['publishMode'], 'partial staging preserves omitted files with additive publishing' );
+Spacefast_Settings::merge( array( 'review_before_live' => false ) );
+$staged_done = Spacefast_Static_Publisher::step( $archive, $version_client, 'additive', 'live' );
+check( $staged_done['done'] && 'staged' === $staged_done['status'], 'changing the toggle during upload cannot promote the staged version' );
+check( 1 === count( array_filter( $version_requests, static fn( array $r ): bool => str_ends_with( $r[0], '/versions' ) ) ), 'resuming staging does not create another version' );
+Spacefast_Sync_State::save( array_merge( Spacefast_Sync_State::defaults(), array( 'desired' => 2, 'active_generation' => 1, 'active_source' => 'auto' ) ) );
+Spacefast_Plugin::static_publish_completed( 'ver_staged', 'staged', 'additive' );
+$staged_state = Spacefast_Sync_State::get();
+check( 'ver_staged' === $staged_state['staged_version_id'] && 'additive' === $staged_state['staged_publish_mode'], 'completion retains staged receipt and publish mode' );
+check( 'auto' === $staged_state['version_sources']['ver_staged'], 'history remembers automatic exports without changing the legacy payload' );
+check( 1 === $staged_state['delivered'] && 'pending' === $staged_state['last_status'], 'staging acknowledges only the exported generation' );
+$action = new ReflectionMethod( Spacefast_Plugin::class, 'version_action' );
+$GLOBALS['spacefast_test_caps'] = array( 'edit_others_posts' );
+check( ! Spacefast_Plugin::can_stage(), 'editors cannot directly publish when review is off' );
+Spacefast_Settings::merge( array( 'review_before_live' => true ) );
+check( Spacefast_Plugin::can_stage() && ! Spacefast_Plugin::can_promote(), 'editors can stage while promotion defaults to administrators' );
+foreach ( array( 'go_live', 'rollback', 'discard' ) as $verb ) {
+	$_POST = array( 'version_id' => 'ver_staged', '_wpnonce' => 'spacefast_wordpress_' . $verb );
+	$before = count( $version_requests );
+	$denied = false;
+	try { $action->invoke( null, $verb, $version_client ); } catch ( RuntimeException $error ) { $denied = true; }
+	check( $denied && $before === count( $version_requests ), 'editor cannot ' . $verb . ' through a forged form' );
+}
+$GLOBALS['spacefast_test_caps'] = array( 'manage_options' );
+$GLOBALS['spacefast_test_filters']['spacefast_wordpress_can_promote'] = static fn( bool $allowed ): bool => false;
+check( ! Spacefast_Plugin::can_promote(), 'the promotion capability filter can restrict administrators' );
+$denied = false;
+try { $action->invoke( null, 'discard', $version_client ); } catch ( RuntimeException $error ) { $denied = true; }
+check( $denied, 'handlers enforce the promotion capability filter' );
+unset( $GLOBALS['spacefast_test_filters']['spacefast_wordpress_can_promote'] );
+foreach ( array( 'go_live', 'rollback', 'discard', 'preview' ) as $verb ) {
+	$_POST = array( 'version_id' => 'ver_staged', '_wpnonce' => 'wrong-action' );
+	$before = count( $version_requests );
+	$denied = false;
+	try { $action->invoke( null, $verb, $version_client ); } catch ( RuntimeException $error ) { $denied = 'Invalid nonce' === $error->getMessage(); }
+	check( $denied && $before === count( $version_requests ), $verb . ' requires its own valid nonce before HTTP' );
+}
+$_POST = array( 'version_id' => 'ver_staged', '_wpnonce' => 'spacefast_wordpress_go_live' );
+Spacefast_Settings::merge( array( 'scope' => 'spaces:publish' ) );
+$before = count( $version_requests );
+check( ! $action->invoke( null, 'go_live', $version_client )['ok'] && $before === count( $version_requests ), 'old grants require reconnection before promotion' );
+Spacefast_Settings::merge( array( 'scope' => 'publish:write spaces:write' ) );
+$_POST['version_id'] = 'ver_other';
+check( ! $action->invoke( null, 'go_live', $version_client )['ok'], 'stale go-live forms cannot promote a different staged version' );
+$_POST['version_id'] = '../live';
+check( ! $action->invoke( null, 'go_live', $version_client )['ok'], 'invalid version ids are rejected before transport' );
+$_POST = array( 'version_id' => 'ver_staged', '_wpnonce' => 'spacefast_wordpress_preview' );
+$GLOBALS['spacefast_test_caps'] = array( 'edit_others_posts' );
+$preview = $action->invoke( null, 'preview', $version_client );
+check( $preview['ok'] && str_ends_with( end( $version_requests )[0], '/ver_staged/preview-session' ), 'editors can request a version-specific preview session' );
+check( '{"landingPath":"/"}' === end( $version_requests )[1]['body'], 'preview opens the exported root' );
+$GLOBALS['spacefast_test_caps'] = array( 'manage_options' );
+$_POST['_wpnonce'] = 'spacefast_wordpress_go_live';
+$version_failure = true;
+check( ! $action->invoke( null, 'go_live', $version_client )['ok'] && $staged_state === Spacefast_Sync_State::get(), 'failed actions leave the staged and pending state intact' );
+$version_failure = false;
+$before = Spacefast_Sync_State::get();
+foreach ( array( 403, 500, 200 ) as $status_code ) {
+	$failed_promote = new Spacefast_Client( static function ( string $url ) use ( $status_code ): array {
+		return str_ends_with( $url, '/promote' )
+			? response( $status_code, array( 'id' => 'ver_waiting', 'status' => 'activating', 'isCurrentProduction' => false ) )
+			: response( 200, array( 'id' => 'ver_staged', 'status' => 'ready', 'isCurrentProduction' => false ) );
+	} );
+	check( ! $action->invoke( null, 'go_live', $failed_promote )['ok'] && $before === Spacefast_Sync_State::get(), 'unconfirmed or failed promotions cannot claim success or clear staging' );
+}
+$promoted = $action->invoke( null, 'go_live', $version_client );
+check( $promoted['ok'] && str_ends_with( end( $version_requests )[0], '/ver_staged/promote' ), 'go live promotes the staged version' );
+check( '{"channel":"live"}' === end( $version_requests )[1]['body'], 'promotion retains the server default refreshRewrites behavior' );
+check( 'ver_promoted' === Spacefast_Sync_State::get()['last_version_id'], 'promotion records the returned id, which may be a new rollback version' );
+check( '' === Spacefast_Sync_State::get()['staged_version_id'] && 1 === Spacefast_Sync_State::get()['delivered'], 'promotion clears only its staged card and preserves queued edits' );
+Spacefast_Sync_State::save( $staged_state );
+$_POST = array( 'version_id' => 'ver_older', '_wpnonce' => 'spacefast_wordpress_rollback' );
+$rolled_back = $action->invoke( null, 'rollback', $version_client );
+check( $rolled_back['ok'] && str_ends_with( end( $version_requests )[0], '/ver_older/promote' ), 'rollback promotes the selected old id' );
+check( 'ver_staged' === Spacefast_Sync_State::get()['staged_version_id'], 'rollback does not discard a separate staged review' );
+
+// Spacefast can require a person to approve a promotion before it runs.
+$approval_requests = array();
+$approval_state = 'required';
+$approval_client = new Spacefast_Client(
+	static function ( string $url, array $args ) use ( &$approval_requests, &$approval_state ): array {
+		if ( ! str_ends_with( $url, '/promote' ) ) return response( 200, array( 'id' => 'ver_older', 'status' => 'ready', 'isCurrentProduction' => false ) );
+		$approval_requests[] = $args['headers'];
+		if ( ! isset( $args['headers']['X-Spacefast-Continuation-Token'] ) ) {
+			return array( 'response' => array( 'code' => 409 ), 'body' => json_encode( array(
+				'code' => 'confirmation_required',
+				'detail' => 'A person must approve this exact action at url before the agent can continue.',
+				'details' => array( 'url' => 'https://my.spacefast.test/approvals/gdc_one', 'continuationToken' => 'secret-continuation', 'expiresAt' => gmdate( 'c', time() + 300 ) ),
+			) ) );
+		}
+		if ( 'required' === $approval_state ) return array( 'response' => array( 'code' => 409 ), 'body' => json_encode( array( 'code' => 'confirmation_pending', 'detail' => 'Still waiting.' ) ) );
+		return response( 200, array( 'id' => 'ver_rollback', 'status' => 'ready', 'isCurrentProduction' => true ) );
+	}
+);
+$finish = new ReflectionMethod( Spacefast_Plugin::class, 'finish_approval_action' );
+$_POST = array( 'version_id' => 'ver_older', '_wpnonce' => 'spacefast_wordpress_rollback' );
+$asked = $action->invoke( null, 'rollback', $approval_client );
+$pending = Spacefast_Plugin::pending_approval();
+check( ! $asked['ok'] && 'approval_required' === $asked['code'] && str_contains( $asked['message'], 'Approve it in Spacefast' ), 'an approval-gated rollback asks for approval in plain words' );
+check( ! str_contains( $asked['message'], 'agent' ) && ! str_contains( $asked['message'], 'secret-continuation' ), 'the approval notice hides the API agent text and the token' );
+check( is_array( $pending ) && 'rollback' === $pending['action'] && 'ver_older' === $pending['version_id'] && 'https://my.spacefast.test/approvals/gdc_one' === $pending['url'], 'the pending approval is remembered with its link' );
+$_POST = array( '_wpnonce' => 'spacefast_wordpress_finish_approval' );
+$early = $finish->invoke( null, $approval_client );
+check( ! $early['ok'] && 'approval_pending' === $early['code'] && null !== Spacefast_Plugin::pending_approval(), 'finishing before approval keeps the request open' );
+$approval_state = 'approved';
+$finished = $finish->invoke( null, $approval_client );
+$last = end( $approval_requests );
+check( $finished['ok'] && 'ver_rollback' === Spacefast_Sync_State::get()['last_version_id'], 'finishing an approved rollback makes it live' );
+check( 'secret-continuation' === $last['X-Spacefast-Continuation-Token'] && $approval_requests[0]['Idempotency-Key'] === $last['Idempotency-Key'], 'the approved request is resent with its token and original idempotency key' );
+check( null === Spacefast_Plugin::pending_approval(), 'a finished approval is cleared' );
+update_option( Spacefast_Plugin::APPROVAL_OPTION, array_merge( $pending, array( 'expires_at' => time() - 1 ) ) );
+check( null === Spacefast_Plugin::pending_approval() && false === get_option( Spacefast_Plugin::APPROVAL_OPTION, false ), 'an expired approval is dropped' );
+$open_client = new Spacefast_Client(
+	static fn( string $url ): array => str_ends_with( $url, '/promote' )
+		? array( 'response' => array( 'code' => 409 ), 'body' => json_encode( array( 'code' => 'confirmation_token_required', 'detail' => 'Send this request again with the continuation token in the X-Spacefast-Continuation-Token header.', 'details' => array( 'approvalId' => 'gdc_one' ) ) ) )
+		: response( 200, array( 'id' => 'ver_older', 'status' => 'ready', 'isCurrentProduction' => false ) )
+);
+$_POST = array( 'version_id' => 'ver_older', '_wpnonce' => 'spacefast_wordpress_rollback' );
+$reopened = $action->invoke( null, 'rollback', $open_client );
+check( ! $reopened['ok'] && 'approval_open' === $reopened['code'] && ! str_contains( $reopened['message'], 'X-Spacefast' ), 'a repeat of an action with an open approval explains itself without API header jargon' );
+Spacefast_Sync_State::save( $staged_state );
+$_POST = array( 'version_id' => 'ver_staged', '_wpnonce' => 'spacefast_wordpress_discard' );
+$version_live = true;
+$before = count( $version_requests );
+check( ! $action->invoke( null, 'discard', $version_client )['ok'] && $before + 1 === count( $version_requests ), 'discard refuses a version that another publisher made live' );
+$version_live = false;
+check( $action->invoke( null, 'discard', $version_client )['ok'], 'discard accepts the API empty 204 response' );
+check( 'DELETE' === end( $version_requests )[1]['method'] && '' === Spacefast_Sync_State::get()['staged_version_id'], 'discard deletes only the staged version and clears its card' );
+$version_client->list_versions( 100 );
+check( str_ends_with( end( $version_requests )[0], '/versions?limit=20' ), 'history is bounded to the most recent 20 versions' );
+$_POST = array();
+// Exercise the actual Simply Static task for both automatic and partial staging.
+require_once dirname( __DIR__ ) . '/includes/class-spacefast-simply-static-task.php';
+$GLOBALS['spacefast_simply_archive'] = $archive;
+$task_requests = array();
+$task_live = false;
+$GLOBALS['spacefast_remote_handler'] = static function ( string $url, array $args ) use ( &$task_requests, &$task_live ): array {
+	$task_requests[] = array( $url, $args );
+	if ( str_ends_with( $url, '/versions' ) ) return response( 201, array( 'versionId' => 'ver_task', 'upload' => null ) );
+	return response( 200, array( 'id' => 'ver_task', 'status' => 'ready', 'isCurrentProduction' => $task_live ) );
+};
+foreach ( array( 'export' => 'snapshot', 'update' => 'additive' ) as $generate_type => $expected_mode ) {
+	$GLOBALS['spacefast_simply_options'] = array( 'generate_type' => $generate_type );
+	Spacefast_Static_Publisher::reset();
+	Spacefast_Sync_State::save( array_merge( Spacefast_Sync_State::defaults(), array( 'active_review' => true, 'active_source' => 'auto' ) ) );
+	Spacefast_Settings::merge( array( 'review_before_live' => false ) );
+	if ( 'export' === $generate_type ) update_option( 'spacefast_wordpress_snapshot_required', true );
+	else delete_option( 'spacefast_wordpress_snapshot_required' );
+	$task_requests = array();
+	$task = new Spacefast_Simply_Static_Publish_Task();
+	check( false === $task->perform() && true === $task->perform(), 'the delivery task completes staged ' . $generate_type . ' exports' );
+	$body = json_decode( $task_requests[0][1]['body'], true );
+	check( null === $body['finalize']['channel'] && $expected_mode === $body['publishMode'], 'delivery carries the pinned review flag and mode for ' . $generate_type );
+	check( 'ver_task' === Spacefast_Sync_State::get()['staged_version_id'], 'the delivery task records the staged version' );
+	if ( 'export' === $generate_type ) {
+		check( true === get_option( 'spacefast_wordpress_snapshot_required' ), 'a staged snapshot preserves the deletion guard until it goes live' );
+		$_POST = array( 'version_id' => 'ver_task', '_wpnonce' => 'spacefast_wordpress_go_live' );
+		check( $action->invoke( null, 'go_live', $version_client )['ok'], 'a complete staged snapshot can be promoted' );
+		check( false === get_option( 'spacefast_wordpress_snapshot_required', false ), 'promoting the full snapshot releases the deletion guard' );
+		$_POST = array();
+	}
+}
+$task_live = true;
+$task_requests = array();
+$GLOBALS['spacefast_simply_options'] = array( 'generate_type' => 'export' );
+Spacefast_Sync_State::save( Spacefast_Sync_State::defaults() );
+check( false === $task->perform() && true === $task->perform(), 'the delivery task still publishes live with the toggle off' );
+check( $task_requests[0][1]['body'] === $static_requests[0][1]['body'], 'toggle-off delivery keeps the legacy request body byte for byte' );
+
+// Render the same version cards exercised by WordPress acceptance, with an injected transport.
+Spacefast_Sync_State::save( $staged_state );
+Spacefast_Settings::merge( array( 'review_before_live' => true ) );
+$GLOBALS['spacefast_remote_handler'] = static fn(): array => response( 200, array(
+	array( 'id' => 'ver_staged', 'status' => 'ready', 'fileCount' => 5, 'filesAddedCount' => 1, 'filesChangedCount' => 2, 'filesRemovedCount' => 3 ),
+	array( 'id' => 'ver_live', 'status' => 'ready', 'fileCount' => 4, 'isCurrentProduction' => true ),
+	array( 'id' => 'ver_old', 'status' => 'ready', 'fileCount' => 3 ),
+) );
+$render_versions = new ReflectionMethod( Spacefast_Plugin::class, 'render_versions' );
+ob_start();
+$render_versions->invoke( null );
+$markup = (string) ob_get_clean();
+foreach ( array( 'Staged version', '1 files added, 2 changed, 3 removed.', 'Open preview', 'Copy preview link', 'Go live', 'Discard', 'Versions', 'Auto', 'Live', 'Make live' ) as $label ) {
+	check( str_contains( $markup, $label ), 'the version cards render ' . $label );
+}
+check( str_contains( $markup, 'value="ver_old"' ) && str_contains( $markup, 'spacefast_wordpress_rollback' ), 'history forms name the selected version and action nonce' );
+$GLOBALS['spacefast_test_caps'] = array( 'edit_others_posts' );
+ob_start();
+$render_versions->invoke( null );
+$editor_markup = (string) ob_get_clean();
+check( str_contains( $editor_markup, 'Open preview' ) && ! str_contains( $editor_markup, '>Go live<' ) && ! str_contains( $editor_markup, '>Make live<' ), 'editor review cards omit promotion controls' );
+$GLOBALS['spacefast_test_caps'] = array( 'manage_options' );
+$GLOBALS['spacefast_remote_handler'] = null;
 Spacefast_Settings::merge( $connection );
 
 unlink( $archive . '/assets/app.js' );

@@ -7,6 +7,7 @@ final class Spacefast_Plugin {
 	const STATIC_DELIVERY_STALE_SECONDS = 2 * HOUR_IN_SECONDS;
 	const LOCK_OPTION = 'spacefast_wordpress_worker_lock';
 	const NOTICE_TRANSIENT = 'spacefast_wordpress_admin_notice';
+	const APPROVAL_OPTION = 'spacefast_wordpress_pending_approval';
 
 	/** @var bool */
 	private static $change_recorded = false;
@@ -25,6 +26,9 @@ final class Spacefast_Plugin {
 		add_action( 'admin_post_spacefast_wordpress_publish', array( __CLASS__, 'manual_static_publish' ) );
 		add_action( 'admin_post_spacefast_wordpress_save_settings', array( __CLASS__, 'save_settings' ) );
 		add_action( 'admin_post_spacefast_wordpress_sync_settings', array( __CLASS__, 'manual_settings_sync' ) );
+		foreach ( array( 'go_live', 'rollback', 'discard', 'preview', 'finish_approval', 'cancel_approval' ) as $action ) {
+			add_action( 'admin_post_spacefast_wordpress_' . $action, array( __CLASS__, $action ) );
+		}
 		add_action( Spacefast_Sync_State::HOOK, array( __CLASS__, 'deliver' ) );
 		add_action( 'init', array( __CLASS__, 'register_simply_static' ), 20 );
 		add_action( 'transition_post_status', array( __CLASS__, 'post_transition' ), 10, 3 );
@@ -76,7 +80,7 @@ final class Spacefast_Plugin {
 		add_options_page(
 			__( 'Spacefast', 'spacefast-wordpress' ),
 			__( 'Spacefast', 'spacefast-wordpress' ),
-			'manage_options',
+			self::can_stage() && ! current_user_can( 'manage_options' ) ? 'edit_others_posts' : 'manage_options',
 			'spacefast-wordpress',
 			array( __CLASS__, 'render_admin' )
 		);
@@ -87,6 +91,208 @@ final class Spacefast_Plugin {
 			wp_die( esc_html__( 'You are not allowed to manage Spacefast.', 'spacefast-wordpress' ), 403 );
 		}
 		check_admin_referer( $action );
+	}
+
+	public static function can_promote(): bool {
+		return (bool) apply_filters( 'spacefast_wordpress_can_promote', current_user_can( 'manage_options' ) );
+	}
+
+	public static function can_stage(): bool {
+		return current_user_can( 'manage_options' ) || (
+			Spacefast_Settings::MODE_STATIC === Spacefast_Settings::mode()
+			&& Spacefast_Settings::configured()
+			&& ! empty( Spacefast_Settings::get()['review_before_live'] )
+			&& current_user_can( 'edit_others_posts' )
+		);
+	}
+
+	/** Authorize every entry point before using the stored Team credential. */
+	/**
+	 * @param array<string,mixed>|null $approval Pending approval being finished; its caller checked the nonce.
+	 */
+	private static function version_action( string $action, ?Spacefast_Client $client = null, ?array $approval = null ): array {
+		$allowed = in_array( $action, array( 'go_live', 'rollback', 'discard' ), true ) ? self::can_promote() : self::can_stage();
+		if ( ! $allowed ) {
+			wp_die( esc_html__( 'You are not allowed to manage this version.', 'spacefast-wordpress' ), 403 );
+		}
+		if ( null === $approval ) {
+			check_admin_referer( 'spacefast_wordpress_' . $action );
+			$version_id = isset( $_POST['version_id'] ) && is_string( $_POST['version_id'] ) ? wp_unslash( $_POST['version_id'] ) : '';
+		} else {
+			$version_id = (string) $approval['version_id'];
+		}
+		$state = Spacefast_Sync_State::get();
+		if ( Spacefast_Settings::MODE_STATIC !== Spacefast_Settings::mode() || ! Spacefast_Settings::selected()
+			|| ! preg_match( '/^ver_[A-Za-z0-9_-]+$/', $version_id )
+			|| ( in_array( $action, array( 'go_live', 'discard', 'preview' ), true ) && $version_id !== $state['staged_version_id'] ) ) {
+			return array( 'ok' => false, 'message' => __( 'This version is no longer available for this action. Reload the page.', 'spacefast-wordpress' ) );
+		}
+		if ( ! Spacefast_OAuth::has_scope( 'publish:write' ) ) {
+			return array( 'ok' => false, 'message' => __( 'Reconnect Spacefast to enable previews, promotion, and rollback.', 'spacefast-wordpress' ) );
+		}
+		$client = $client ?? new Spacefast_Client();
+		// Check the server, not the cached card: another publisher may have made it live.
+		$version = $client->get_static_version( $version_id );
+		if ( ! $version['ok'] ) return $version;
+		if ( 'ready' !== ( $version['data']['status'] ?? '' ) || ! empty( $version['data']['isCurrentProduction'] ) ) {
+			return array( 'ok' => false, 'message' => __( 'Choose a ready version that is not currently live.', 'spacefast-wordpress' ) );
+		}
+		if ( 'preview' === $action ) return $client->preview_session( $version_id, '/' );
+		if ( 'discard' === $action ) {
+			$result = $client->delete_version( $version_id );
+		} else {
+			$idempotency_key = null === $approval ? wp_generate_uuid4() : (string) $approval['idempotency_key'];
+			$result = $client->promote_version( $version_id, $idempotency_key, null === $approval ? '' : (string) $approval['token'] );
+			if ( ! $result['ok'] && 'confirmation_required' === $result['code'] && null === $approval ) {
+				return self::remember_approval( $action, $version_id, $idempotency_key, $result );
+			}
+			if ( ! $result['ok'] && 'confirmation_token_required' === $result['code'] && null === $approval ) {
+				// An earlier request for this exact action is still open in Spacefast.
+				return array( 'ok' => false, 'code' => 'approval_open', 'message' => __( 'Spacefast already has an approval request open for this action. Decide it in Spacefast or wait for it to expire, then try again.', 'spacefast-wordpress' ) );
+			}
+			if ( ! $result['ok'] && null !== $approval && in_array( $result['code'], array( 'confirmation_required', 'confirmation_pending', 'confirmation_token_required' ), true ) ) {
+				return array( 'ok' => false, 'code' => 'approval_pending', 'message' => __( 'Spacefast has not recorded an approval yet. Approve it in Spacefast, then choose Finish again.', 'spacefast-wordpress' ) );
+			}
+		}
+		if ( ! $result['ok'] ) return $result;
+		if ( 'discard' !== $action && ( 'ready' !== ( $result['data']['status'] ?? '' ) || true !== ( $result['data']['isCurrentProduction'] ?? false )
+			|| ! preg_match( '/^ver_[A-Za-z0-9_-]+$/', (string) ( $result['data']['id'] ?? '' ) ) ) ) {
+			return array( 'ok' => false, 'message' => __( 'Promotion is not confirmed yet. Reload Versions to check before retrying.', 'spacefast-wordpress' ) );
+		}
+		$updated = Spacefast_Sync_State::mutate(
+			static function ( array $current ) use ( $action, $version_id, $result ): array {
+				if ( $current['staged_version_id'] === $version_id ) {
+					$current['staged_version_id'] = '';
+					$current['staged_publish_mode'] = '';
+				}
+				if ( 'discard' !== $action ) {
+					$current['last_version_id'] = $result['data']['id'];
+					$current['last_success_at'] = time();
+					$current['version_sources'][ $result['data']['id'] ] = $current['version_sources'][ $result['data']['id'] ] ?? 'manual';
+					$current['version_sources'] = array_slice( $current['version_sources'], -20, null, true );
+				}
+				// Do not acknowledge queued edits or overwrite an active export.
+				if ( ! self::static_delivery_active( $current ) && (int) $current['desired'] <= (int) $current['delivered'] ) {
+					$current['last_status'] = 'discard' === $action ? 'idle' : 'live';
+				}
+				return $current;
+			}
+		);
+		if ( 'discard' !== $action ) {
+			Spacefast_Settings::merge( array( 'verified_at' => time() ) );
+			if ( $version_id === $state['staged_version_id'] && 'snapshot' === $state['staged_publish_mode']
+				&& (int) $updated['desired'] <= (int) $state['delivered'] ) {
+				delete_option( 'spacefast_wordpress_snapshot_required' );
+			}
+		}
+		return $result;
+	}
+
+	/**
+	 * Spacefast can ask a person to approve a promotion before it runs. Keep the
+	 * continuation token server-side and resend the identical request later.
+	 *
+	 * @param array<string,mixed> $result confirmation_required response.
+	 */
+	private static function remember_approval( string $action, string $version_id, string $idempotency_key, array $result ): array {
+		$details = $result['details'] ?? array();
+		$url = (string) ( $details['url'] ?? '' );
+		$token = (string) ( $details['continuationToken'] ?? '' );
+		if ( 'https' !== wp_parse_url( $url, PHP_URL_SCHEME ) || '' === $token ) {
+			return array( 'ok' => false, 'code' => 'confirmation_required', 'message' => __( 'Spacefast asked for an approval it did not describe. Try again from Spacefast.', 'spacefast-wordpress' ) );
+		}
+		$expires_at = strtotime( (string) ( $details['expiresAt'] ?? '' ) );
+		update_option(
+			self::APPROVAL_OPTION,
+			array(
+				'action' => $action,
+				'version_id' => $version_id,
+				'idempotency_key' => $idempotency_key,
+				'token' => $token,
+				'url' => $url,
+				'expires_at' => false === $expires_at ? time() + 10 * MINUTE_IN_SECONDS : $expires_at,
+			),
+			false
+		);
+		return array(
+			'ok' => false,
+			'code' => 'approval_required',
+			'message' => 'rollback' === $action
+				? __( 'Spacefast needs a person to approve this rollback. Approve it in Spacefast, then choose Finish.', 'spacefast-wordpress' )
+				: __( 'Spacefast needs a person to approve going live. Approve it in Spacefast, then choose Finish.', 'spacefast-wordpress' ),
+		);
+	}
+
+	/** @return array<string,mixed>|null */
+	public static function pending_approval(): ?array {
+		$approval = get_option( self::APPROVAL_OPTION, null );
+		if ( ! is_array( $approval ) || ! in_array( $approval['action'] ?? '', array( 'go_live', 'rollback' ), true ) ) return null;
+		if ( (int) ( $approval['expires_at'] ?? 0 ) <= time() ) {
+			delete_option( self::APPROVAL_OPTION );
+			return null;
+		}
+		return $approval;
+	}
+
+	private static function finish_approval_action( ?Spacefast_Client $client = null ): array {
+		if ( ! self::can_promote() ) {
+			wp_die( esc_html__( 'You are not allowed to manage this version.', 'spacefast-wordpress' ), 403 );
+		}
+		check_admin_referer( 'spacefast_wordpress_finish_approval' );
+		$approval = self::pending_approval();
+		if ( null === $approval ) {
+			return array( 'ok' => false, 'message' => __( 'The approval request expired. Start the action again.', 'spacefast-wordpress' ) );
+		}
+		$result = self::version_action( (string) $approval['action'], $client, $approval );
+		if ( 'approval_pending' !== ( $result['code'] ?? '' ) ) delete_option( self::APPROVAL_OPTION );
+		return $result + array( 'action' => $approval['action'] );
+	}
+
+	public static function finish_approval(): void {
+		$result = self::finish_approval_action();
+		self::notice( $result['ok'] ? 'success' : 'error', $result['ok'] ? __( 'The selected version is now live.', 'spacefast-wordpress' ) : $result['message'] );
+		self::redirect();
+	}
+
+	public static function cancel_approval(): void {
+		if ( ! self::can_promote() ) {
+			wp_die( esc_html__( 'You are not allowed to manage this version.', 'spacefast-wordpress' ), 403 );
+		}
+		check_admin_referer( 'spacefast_wordpress_cancel_approval' );
+		delete_option( self::APPROVAL_OPTION );
+		self::notice( 'success', __( 'Approval request dismissed. Nothing changed.', 'spacefast-wordpress' ) );
+		self::redirect();
+	}
+
+	private static function handle_version_action( string $action ): void {
+		$result = self::version_action( $action );
+		self::notice( $result['ok'] ? 'success' : ( 'approval_required' === ( $result['code'] ?? '' ) ? 'warning' : 'error' ), $result['ok']
+			? ( 'discard' === $action ? __( 'Staged version discarded.', 'spacefast-wordpress' ) : __( 'The selected version is now live.', 'spacefast-wordpress' ) )
+			: $result['message'] );
+		self::redirect();
+	}
+
+	public static function go_live(): void {
+		self::handle_version_action( 'go_live' );
+	}
+
+	public static function rollback(): void {
+		self::handle_version_action( 'rollback' );
+	}
+
+	public static function discard(): void {
+		self::handle_version_action( 'discard' );
+	}
+
+	public static function preview(): void {
+		$result = self::version_action( 'preview' );
+		nocache_headers();
+		if ( ! $result['ok'] ) wp_send_json_error( array( 'message' => $result['message'] ), 400 );
+		$url = (string) ( $result['data']['url'] ?? '' );
+		if ( 'https' !== wp_parse_url( $url, PHP_URL_SCHEME ) ) {
+			wp_send_json_error( array( 'message' => __( 'Spacefast returned an invalid preview URL.', 'spacefast-wordpress' ) ), 502 );
+		}
+		wp_send_json_success( array( 'url' => $url, 'expiresAt' => (string) ( $result['data']['expiresAt'] ?? '' ) ) );
 	}
 
 	private static function redirect(): void {
@@ -381,7 +587,8 @@ final class Spacefast_Plugin {
 	}
 
 	public static function manual_static_publish(): void {
-		self::assert_admin( 'spacefast_wordpress_publish' );
+		if ( ! self::can_stage() ) wp_die( esc_html__( 'You are not allowed to publish.', 'spacefast-wordpress' ), 403 );
+		check_admin_referer( 'spacefast_wordpress_publish' );
 		if ( Spacefast_Settings::MODE_STATIC !== Spacefast_Settings::mode() ) {
 			self::notice( 'error', __( 'Switch to Static WordPress to publish an export.', 'spacefast-wordpress' ) );
 			self::redirect();
@@ -417,6 +624,7 @@ final class Spacefast_Plugin {
 		Spacefast_Settings::merge(
 			array(
 				'automatic_sync' => isset( $_POST['automatic_sync'] ),
+				'review_before_live' => isset( $_POST['review_before_live'] ),
 				'sync_title' => isset( $_POST['sync_title'] ),
 				'sync_visibility' => isset( $_POST['sync_visibility'] ),
 				'sync_source' => isset( $_POST['sync_source'] ),
@@ -804,6 +1012,8 @@ final class Spacefast_Plugin {
 			Spacefast_Sync_State::mutate(
 				static function ( array $state ): array {
 					$state['last_attempt_at'] = time();
+					$state['active_source'] = $state['pending_source'];
+					$state['active_review'] = ! empty( Spacefast_Settings::get()['review_before_live'] );
 					return $state;
 				}
 			);
@@ -944,6 +1154,8 @@ final class Spacefast_Plugin {
 					(string) wp_generate_uuid4()
 				);
 				$next['last_status'] = 'exporting';
+				$next['active_review'] = ! empty( Spacefast_Settings::get()['review_before_live'] );
+				$next['active_source'] = null !== $state['active_review'] ? $state['active_source'] : 'manual';
 				$next['active_generation'] = (int) $next['desired'];
 				$next['last_attempt_at'] = time();
 				return $next;
@@ -962,13 +1174,13 @@ final class Spacefast_Plugin {
 		);
 	}
 
-	public static function static_publish_completed( string $version_id, string $status ): void {
+	public static function static_publish_completed( string $version_id, string $status, string $publish_mode = 'snapshot' ): void {
 		$current = Spacefast_Sync_State::mutate(
-			static fn( array $state ): array => Spacefast_Sync_State::acknowledge_static(
-				$state,
-				$version_id,
-				$status
-			)
+			static function ( array $state ) use ( $version_id, $status, $publish_mode ): array {
+				$state = Spacefast_Sync_State::acknowledge_static( $state, $version_id, $status );
+				if ( 'staged' === $status ) $state['staged_publish_mode'] = $publish_mode;
+				return $state;
+			}
 		);
 		if ( 'live' === $status ) Spacefast_Settings::merge( array( 'verified_at' => time() ) );
 		if ( (int) $current['desired'] > (int) $current['delivered'] ) {
@@ -1040,6 +1252,7 @@ final class Spacefast_Plugin {
 			'finalizing' => __( 'Activating new version', 'spacefast-wordpress' ),
 			'live' => __( 'Published live', 'spacefast-wordpress' ),
 			'ready' => __( 'Version ready', 'spacefast-wordpress' ),
+			'staged' => __( 'Staged for review', 'spacefast-wordpress' ),
 			'unchanged' => __( 'Already up to date', 'spacefast-wordpress' ),
 			'retrying' => __( 'Retrying automatically', 'spacefast-wordpress' ),
 			'blocked' => __( 'Needs attention', 'spacefast-wordpress' ),
@@ -1080,11 +1293,20 @@ final class Spacefast_Plugin {
 	}
 
 	public static function render_admin(): void {
-		if ( ! current_user_can( 'manage_options' ) ) {
+		if ( ! self::can_stage() ) {
 			return;
 		}
 		$notice = get_transient( self::NOTICE_TRANSIENT );
 		delete_transient( self::NOTICE_TRANSIENT );
+		if ( ! current_user_can( 'manage_options' ) ) {
+			echo '<div class="wrap"><h1>' . esc_html__( 'Spacefast', 'spacefast-wordpress' ) . '</h1>';
+			if ( is_array( $notice ) ) echo '<p role="status">' . esc_html( $notice['message'] ) . '</p>';
+			echo '<p>' . esc_html( self::status_label( Spacefast_Sync_State::get()['last_status'], true ) ) . '</p>';
+			self::action_form( 'spacefast_wordpress_publish', __( 'Stage now', 'spacefast-wordpress' ), 'primary' );
+			self::render_versions();
+			echo '</div>';
+			return;
+		}
 		$state = Spacefast_Sync_State::get();
 		$settings = Spacefast_Settings::get();
 		$authorized = Spacefast_Settings::authorized();
@@ -1098,7 +1320,7 @@ final class Spacefast_Plugin {
 			<h1><?php esc_html_e( 'Spacefast', 'spacefast-wordpress' ); ?></h1>
 			<p><?php esc_html_e( 'Publish this WordPress site to a fast, static Space.', 'spacefast-wordpress' ); ?></p>
 			<?php if ( is_array( $notice ) ) : ?>
-				<div class="notice notice-<?php echo esc_attr( 'error' === $notice['type'] ? 'error' : 'success' ); ?> is-dismissible"><p><?php echo esc_html( $notice['message'] ); ?></p></div>
+				<div class="notice notice-<?php echo esc_attr( in_array( $notice['type'], array( 'error', 'warning' ), true ) ? $notice['type'] : 'success' ); ?> is-dismissible"><p><?php echo esc_html( $notice['message'] ); ?></p></div>
 			<?php endif; ?>
 			<?php if ( ! $authorized ) : ?>
 				<div class="card" style="max-width:720px;padding:24px">
@@ -1173,6 +1395,7 @@ final class Spacefast_Plugin {
 						<?php else : ?><?php self::action_form( 'spacefast_wordpress_build', $configured ? __( 'Build now', 'spacefast-wordpress' ) : __( 'Retry build', 'spacefast-wordpress' ), 'primary' ); ?><?php endif; ?>
 					</div>
 				</div>
+				<?php if ( $static_mode ) self::render_versions(); ?>
 				<h2><?php esc_html_e( 'WordPress sync', 'spacefast-wordpress' ); ?></h2>
 				<?php if ( ! Spacefast_OAuth::has_scope( 'spaces:write' ) ) : ?>
 					<div class="notice notice-warning inline" style="max-width:720px"><p><?php esc_html_e( 'Reconnect once to let WordPress keep this Space’s settings in sync.', 'spacefast-wordpress' ); ?></p><?php self::oauth_action_form( $mode, __( 'Reconnect Spacefast', 'spacefast-wordpress' ) ); ?></div>
@@ -1180,6 +1403,7 @@ final class Spacefast_Plugin {
 				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="max-width:720px">
 					<input type="hidden" name="action" value="spacefast_wordpress_save_settings">
 					<?php wp_nonce_field( 'spacefast_wordpress_save_settings' ); ?>
+					<?php if ( $static_mode ) : ?><label style="display:block;margin:10px 0"><input type="checkbox" name="review_before_live" value="1" <?php checked( ! empty( $settings['review_before_live'] ) ); ?>> <strong><?php esc_html_e( 'Review before going live', 'spacefast-wordpress' ); ?></strong><br><span class="description"><?php esc_html_e( 'Manual and automatic exports wait for approval. Editors can stage; administrators can make versions live.', 'spacefast-wordpress' ); ?></span></label><?php endif; ?>
 					<label style="display:block;margin:10px 0"><input type="checkbox" name="automatic_sync" value="1" <?php checked( ! empty( $settings['automatic_sync'] ) ); ?>> <strong><?php esc_html_e( 'Publish automatically when WordPress changes', 'spacefast-wordpress' ); ?></strong><br><span class="description" style="margin-left:24px"><?php esc_html_e( 'A 60-second quiet window combines a batch of edits into one publish.', 'spacefast-wordpress' ); ?></span></label>
 					<label style="display:block;margin:10px 0"><input type="checkbox" name="sync_title" value="1" <?php checked( ! empty( $settings['sync_title'] ) ); ?>> <?php esc_html_e( 'Sync the site title and description', 'spacefast-wordpress' ); ?></label>
 					<label style="display:block;margin:10px 0"><input type="checkbox" name="sync_visibility" value="1" <?php checked( ! empty( $settings['sync_visibility'] ) ); ?>> <?php esc_html_e( 'Sync search engine visibility', 'spacefast-wordpress' ); ?></label>
@@ -1204,6 +1428,153 @@ final class Spacefast_Plugin {
 				<p class="description"><?php esc_html_e( 'OAuth tokens are stored as non-autoloaded WordPress options and are never displayed.', 'spacefast-wordpress' ); ?></p>
 			<?php endif; ?>
 		</div>
+		<?php
+	}
+
+	private static function render_versions(): void {
+		$client = new Spacefast_Client();
+		$state = Spacefast_Sync_State::get();
+		$scoped = Spacefast_OAuth::has_scope( 'publish:write' );
+		if ( ! $scoped ) {
+			echo '<div class="notice notice-warning inline"><p>' . esc_html__( 'Reconnect Spacefast to enable previews, promotion, and rollback.', 'spacefast-wordpress' ) . '</p>';
+			if ( current_user_can( 'manage_options' ) ) self::oauth_action_form( Spacefast_Settings::MODE_STATIC, __( 'Reconnect Spacefast', 'spacefast-wordpress' ) );
+			echo '</div>';
+		}
+		$history = $client->list_versions( 20 );
+		$versions = $history['ok'] ? $history['data'] : array();
+		$staged = null;
+		foreach ( $versions as $version ) {
+			if ( is_array( $version ) && ( $version['id'] ?? '' ) === $state['staged_version_id'] ) $staged = $version;
+		}
+		if ( null === $staged && '' !== $state['staged_version_id'] ) {
+			$result = $client->get_static_version( $state['staged_version_id'] );
+			if ( $result['ok'] ) $staged = $result['data'];
+			else echo '<div class="notice notice-error inline"><p>' . esc_html( $result['message'] ) . '</p></div>';
+		}
+		$approval = $scoped && self::can_promote() ? self::pending_approval() : null;
+		if ( null !== $approval ) :
+			$approval_label = '';
+			foreach ( $versions as $version ) {
+				if ( is_array( $version ) && ( $version['id'] ?? '' ) === $approval['version_id'] ) $approval_label = (string) ( $version['ref'] ?? '' );
+			}
+			$approval_label = '' !== $approval_label ? $approval_label : (string) $approval['version_id'];
+			?>
+			<div class="card" style="max-width:720px;padding:24px">
+				<h2><?php esc_html_e( 'Waiting for approval', 'spacefast-wordpress' ); ?></h2>
+				<p><?php echo esc_html( sprintf( 'rollback' === $approval['action'] ? __( 'Rolling back to %s needs a person to approve it in Spacefast.', 'spacefast-wordpress' ) : __( 'Making %s live needs a person to approve it in Spacefast.', 'spacefast-wordpress' ), $approval_label ) ); ?></p>
+				<p><?php echo esc_html( sprintf( __( 'The request expires at %s.', 'spacefast-wordpress' ), wp_date( get_option( 'time_format' ), (int) $approval['expires_at'] ) ) ); ?></p>
+				<p style="display:flex;gap:8px;flex-wrap:wrap">
+					<a class="button button-primary" href="<?php echo esc_url( $approval['url'] ); ?>" target="_blank" rel="noopener noreferrer"><?php esc_html_e( 'Approve in Spacefast', 'spacefast-wordpress' ); ?></a>
+					<?php self::version_form( 'finish_approval', (string) $approval['version_id'], __( 'Finish', 'spacefast-wordpress' ) ); ?>
+					<?php self::version_form( 'cancel_approval', (string) $approval['version_id'], __( 'Cancel', 'spacefast-wordpress' ) ); ?>
+				</p>
+			</div>
+			<?php
+		endif;
+		if ( is_array( $staged ) && 'ready' === ( $staged['status'] ?? '' ) && empty( $staged['isCurrentProduction'] ) ) :
+			$version_id = (string) $staged['id'];
+			?>
+			<div class="card" style="max-width:720px;padding:24px">
+				<h2><?php esc_html_e( 'Staged version', 'spacefast-wordpress' ); ?></h2>
+				<p><code><?php echo esc_html( $version_id ); ?></code></p>
+				<p><?php echo esc_html( sprintf( __( '%1$s files added, %2$s changed, %3$s removed.', 'spacefast-wordpress' ), $staged['filesAddedCount'] ?? '—', $staged['filesChangedCount'] ?? '—', $staged['filesRemovedCount'] ?? '—' ) ); ?></p>
+				<?php if ( $scoped ) : ?>
+					<form id="spacefast-preview" method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+						<input type="hidden" name="action" value="spacefast_wordpress_preview">
+						<input type="hidden" name="version_id" value="<?php echo esc_attr( $version_id ); ?>">
+						<?php wp_nonce_field( 'spacefast_wordpress_preview' ); ?>
+						<button type="button" class="button" data-preview="open"><?php esc_html_e( 'Open preview', 'spacefast-wordpress' ); ?></button>
+						<button type="button" class="button" data-preview="copy"><?php esc_html_e( 'Copy preview link', 'spacefast-wordpress' ); ?></button>
+						<p><?php esc_html_e( 'Preview links grant access to this version for 10 minutes. Share only with your reviewers.', 'spacefast-wordpress' ); ?></p>
+						<input type="text" class="large-text" readonly hidden aria-label="<?php esc_attr_e( 'Preview link', 'spacefast-wordpress' ); ?>">
+						<p role="status" aria-live="polite"></p>
+					</form>
+					<div style="display:flex;gap:8px;margin-top:12px">
+						<?php if ( self::can_promote() ) : ?>
+							<?php self::version_form( 'go_live', $version_id, __( 'Go live', 'spacefast-wordpress' ) ); ?>
+							<?php self::version_form( 'discard', $version_id, __( 'Discard', 'spacefast-wordpress' ) ); ?>
+						<?php endif; ?>
+					</div>
+				<?php endif; ?>
+			</div>
+			<script>
+			(function () {
+				const form = document.getElementById('spacefast-preview');
+				if (!form) return;
+				form.addEventListener('click', async function (event) {
+					const button = event.target.closest('[data-preview]');
+					if (!button || button.disabled) return;
+					const buttons = form.querySelectorAll('button');
+					const status = form.querySelector('[role="status"]');
+					const field = form.querySelector('input[type="text"]');
+					const preview = button.dataset.preview === 'open' ? window.open('about:blank', '_blank') : null;
+					if (preview) preview.opener = null;
+					buttons.forEach(item => item.disabled = true);
+					field.hidden = true;
+					status.textContent = '';
+					try {
+						const response = await fetch(form.action, { method: 'POST', body: new FormData(form), credentials: 'same-origin' });
+						const result = await response.json();
+						if (!result.success) throw new Error(result.data.message);
+						const url = new URL(result.data.url);
+						if (url.protocol !== 'https:') throw new Error(<?php echo wp_json_encode( __( 'Invalid preview URL.', 'spacefast-wordpress' ) ); ?>);
+						if (preview) preview.location.replace(url.href);
+						else {
+							field.value = url.href;
+							field.hidden = false;
+							field.select();
+							try { await navigator.clipboard.writeText(url.href); }
+							catch (_) { field.focus(); field.select(); }
+						}
+						status.textContent = <?php echo wp_json_encode( __( 'Preview link expires at: ', 'spacefast-wordpress' ) ); ?> + result.data.expiresAt;
+					} catch (error) {
+						if (preview) preview.close();
+						status.textContent = error.message;
+					} finally {
+						buttons.forEach(item => item.disabled = false);
+					}
+				});
+			}());
+			</script>
+		<?php endif; ?>
+		<div class="card" style="max-width:720px;padding:24px">
+			<h2><?php esc_html_e( 'Versions', 'spacefast-wordpress' ); ?></h2>
+			<p><?php esc_html_e( 'The last 20 versions. Choose Make live to restore an earlier version.', 'spacefast-wordpress' ); ?></p>
+			<?php if ( ! $history['ok'] ) : ?><p role="alert"><?php echo esc_html( $history['message'] ); ?></p>
+			<?php elseif ( ! $versions ) : ?><p><?php esc_html_e( 'No versions yet.', 'spacefast-wordpress' ); ?></p>
+			<?php else : ?>
+			<table class="widefat striped">
+				<thead><tr><th><?php esc_html_e( 'Version', 'spacefast-wordpress' ); ?></th><th><?php esc_html_e( 'Time', 'spacefast-wordpress' ); ?></th><th><?php esc_html_e( 'Source', 'spacefast-wordpress' ); ?></th><th><?php esc_html_e( 'Files', 'spacefast-wordpress' ); ?></th><th><?php esc_html_e( 'Status', 'spacefast-wordpress' ); ?></th></tr></thead>
+				<tbody><?php foreach ( $versions as $version ) : if ( ! is_array( $version ) ) continue;
+					$id = (string) ( $version['id'] ?? '' );
+					$source = $state['version_sources'][ $id ] ?? '';
+					$created = strtotime( (string) ( $version['createdAt'] ?? '' ) );
+					?>
+					<tr><td><code><?php echo esc_html( (string) ( $version['ref'] ?? $id ) ); ?></code></td>
+					<td><?php echo esc_html( $created ? wp_date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), $created ) : '—' ); ?></td>
+					<td><?php echo esc_html( 'manual' === $source ? __( 'Manual', 'spacefast-wordpress' ) : ( 'auto' === $source ? __( 'Auto', 'spacefast-wordpress' ) : __( 'Unknown', 'spacefast-wordpress' ) ) ); ?></td>
+					<td><?php echo esc_html( (string) ( $version['fileCount'] ?? '—' ) ); ?></td>
+					<td><?php if ( ! empty( $version['isCurrentProduction'] ) ) : ?>
+						<strong><?php esc_html_e( 'Live', 'spacefast-wordpress' ); ?></strong>
+					<?php elseif ( 'ready' === ( $version['status'] ?? '' ) && self::can_promote() && $scoped ) : ?>
+						<?php self::version_form( 'rollback', $id, __( 'Make live', 'spacefast-wordpress' ) ); ?>
+					<?php else : ?><?php echo esc_html( (string) ( $version['status'] ?? '' ) ); ?><?php endif; ?></td></tr>
+				<?php endforeach; ?></tbody>
+			</table>
+			<?php endif; ?>
+		</div>
+		<?php
+	}
+
+	private static function version_form( string $action, string $version_id, string $label ): void {
+		$action = 'spacefast_wordpress_' . $action;
+		?>
+		<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+			<input type="hidden" name="action" value="<?php echo esc_attr( $action ); ?>">
+			<input type="hidden" name="version_id" value="<?php echo esc_attr( $version_id ); ?>">
+			<?php wp_nonce_field( $action ); ?>
+			<button type="submit" class="button"><?php echo esc_html( $label ); ?></button>
+		</form>
 		<?php
 	}
 

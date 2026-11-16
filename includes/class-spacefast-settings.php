@@ -33,6 +33,7 @@ final class Spacefast_Settings {
 				'live_url' => '',
 				'verified_at' => 0,
 				'automatic_sync' => true,
+				'review_before_live' => false,
 				'sync_title' => true,
 				'sync_visibility' => true,
 				'sync_source' => true,
@@ -106,6 +107,7 @@ final class Spacefast_Settings {
 		delete_option( Spacefast_OAuth::CHOICES_OPTION );
 		delete_option( Spacefast_OAuth::CREATION_OPTION );
 		delete_option( 'spacefast_wordpress_snapshot_required' );
+		delete_option( 'spacefast_wordpress_pending_approval' );
 		Spacefast_Sync_State::reset();
 		Spacefast_Static_Publisher::reset();
 	}
