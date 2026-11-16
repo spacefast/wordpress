@@ -45,6 +45,12 @@ function add_action( string $hook, $callback, int $priority = 10, int $accepted_
 function add_filter( string $hook, $callback, int $priority = 10, int $accepted_args = 1 ): void {
 	$GLOBALS['spacefast_hooks'][ $hook ] = array( $callback, $priority, $accepted_args );
 }
+function remove_filter( string $hook, $callback, int $priority = 10 ): void {
+	unset( $GLOBALS['spacefast_hooks'][ $hook ] );
+}
+function remove_action( string $hook, $callback, int $priority = 10 ): void {
+	remove_filter( $hook, $callback, $priority );
+}
 function wp_parse_url( string $value ) {
 	return parse_url( $value );
 }
@@ -146,6 +152,9 @@ function add_query_arg( array $args, string $url ): string {
 }
 function home_url(): string {
 	return 'https://wp.example.test';
+}
+function get_current_blog_id(): int {
+	return 1;
 }
 function is_wp_error( $value ): bool {
 	return $value instanceof Spacefast_Test_Wp_Error;
@@ -1041,20 +1050,36 @@ $fallback_static_ack = Spacefast_Sync_State::acknowledge_static(
 check( 4 === $fallback_static_ack['delivered'], 'static completion falls back to the desired generation when the exporter start hook is absent' );
 check( 'live' === $fallback_static_ack['last_status'], 'a missing exporter start hook cannot create a publish loop' );
 
+Spacefast_Settings::disconnect();
+Spacefast_Sync_State::save( Spacefast_Sync_State::defaults() );
+check( ! Spacefast_Plugin::do_manual_build()['ok'], 'manual build rejects a disconnected site' );
+check( ! Spacefast_Plugin::do_manual_settings_sync()['ok'], 'manual settings sync rejects a disconnected site' );
+Spacefast_Settings::merge( array_merge( $connection, array( 'mode' => Spacefast_Settings::MODE_STATIC ) ) );
+check( ! Spacefast_Plugin::do_manual_build()['ok'], 'manual build rejects static mode' );
+check( ! Spacefast_Plugin::do_manual_static_publish()['ok'], 'manual publish requires Simply Static' );
+
 eval(
 	'namespace Simply_Static {
 		class Task {}
 		class Options {
 			private static $instance;
 			public static function instance() { return self::$instance ??= new self(); }
+			public static function reinstance() { self::$instance = null; return self::instance(); }
 			public function set($key, $value) { return $this; }
 			public function save() { return true; }
 		}
 		class Plugin {
 			public static $runs = 0;
+			public static $job;
+			public static $start;
 			private static $instance;
 			public static function instance() { return self::$instance ??= new self(); }
-			public function run_static_export() { self::$runs++; return true; }
+			public function run_static_export() {
+				self::$runs++;
+				return is_callable(self::$start) ? call_user_func(self::$start) : true;
+			}
+			public function get_archive_creation_job() { return self::$job; }
+			public function set_options($options) {}
 		}
 	}'
 );
@@ -1280,5 +1305,192 @@ unlink( $custom_archive . '/index.html' );
 unlink( $custom_archive . '/sf.jsonc' );
 rmdir( $custom_archive );
 Spacefast_Static_Publisher::reset();
+
+// Exercise CLI failures as exceptions; the real WP-CLI maps error() to exit 1.
+final class WP_CLI {
+	public static array $lines = array();
+	public static array $commands = array();
+	public static array $confirmation = array();
+	public static function add_command( string $name, $command ): void { self::$commands[ $name ] = $command; }
+	public static function line( string $line ): void { self::$lines[] = $line; }
+	public static function success( string $line ): void { self::$lines[] = $line; }
+	public static function error( string $line ): void { throw new RuntimeException( $line ); }
+	public static function confirm( string $line, array $args ): void { self::$confirmation = $args; }
+}
+require_once dirname( __DIR__ ) . '/includes/class-spacefast-cli.php';
+check( Spacefast_CLI::class === WP_CLI::$commands['spacefast'], 'registers the spacefast command' );
+$cli = new Spacefast_CLI();
+$cli_error = static function ( callable $command, string $expected ): void {
+	try {
+		$command();
+	} catch ( RuntimeException $error ) {
+		check( str_contains( $error->getMessage(), $expected ), 'unexpected CLI error: ' . $error->getMessage() );
+		return;
+	}
+	throw new RuntimeException( 'Expected CLI error: ' . $expected );
+};
+Spacefast_Settings::merge( $connection );
+Spacefast_Sync_State::save( Spacefast_Sync_State::defaults() );
+$cli->status( array(), array( 'format' => 'json' ) );
+$json = end( WP_CLI::$lines );
+$status = json_decode( $json, true, 512, JSON_THROW_ON_ERROR );
+check( 'idle' === $status['state'] && false === $status['pending'], 'status JSON includes typed local delivery state' );
+foreach ( array( 'access_token', 'refresh_token', 'client_id', $connection['access_token'], $connection['refresh_token'] ) as $secret ) {
+	check( ! str_contains( $json, $secret ), 'status excludes credentials' );
+}
+$cli_error( static fn() => $cli->status( array(), array( 'format' => 'yaml' ) ), 'Format must' );
+foreach ( array( '0', '-1', 'no', '1.5' ) as $timeout ) {
+	$cli_error( static fn() => $cli->publish( array(), array( 'timeout' => $timeout ) ), 'positive integer' );
+}
+$cli_error( static fn() => $cli->publish( array(), array() ), 'Static WordPress' );
+
+$build_requests = 0;
+$build_status = 'succeeded';
+$GLOBALS['spacefast_remote_handler'] = static function ( string $url, array $args ) use ( &$build_requests, &$build_status ): array {
+	if ( 'POST' === $args['method'] ) {
+		$build_requests++;
+		return response( 201, array( 'build' => array( 'id' => 'bld_cli' ) ) );
+	}
+	if ( str_contains( $url, '/v1/builds/' ) ) return response( 200, array( 'status' => $build_status ) );
+	return response( 200, array( 'ready' => true ) );
+};
+$cli->build( array(), array() );
+check( 1 === $build_requests && 'building' === Spacefast_Sync_State::get()['last_status'], 'manual build starts immediately' );
+$cli->build( array(), array( 'wait' => true ) );
+check( 2 === $build_requests && 'live' === Spacefast_Sync_State::get()['last_status'], 'wait includes the requested successor of an active build' );
+$build_status = 'failed';
+$cli_error( static fn() => $cli->build( array(), array( 'wait' => true ) ), 'did not finish successfully' );
+$GLOBALS['spacefast_remote_handler'] = static fn(): array => response( 403 );
+$cli_error( static fn() => $cli->build( array(), array() ), 'no longer authorized' );
+
+$patch = array();
+$GLOBALS['spacefast_remote_handler'] = static function ( string $url, array $args ) use ( &$patch ): array {
+	if ( 'PATCH' === $args['method'] ) $patch = json_decode( $args['body'], true );
+	return response( 200, array( 'config' => array( 'keep' => true ), 'settingsDigest' => 'digest-cli' ) );
+};
+Spacefast_Settings::merge( array( 'scope' => 'spaces:write offline_access', 'sync_title' => true, 'sync_visibility' => true ) );
+$cli->sync_settings( array(), array() );
+check( 'Demo WordPress' === $patch['title'] && 'Demo description' === $patch['config']['meta']['description'], 'extracted sync sends site title and description' );
+check( isset( $patch['noindex'] ) && true === $patch['config']['keep'] && 'digest-cli' === $patch['baseSettingsDigest'], 'extracted sync preserves unrelated settings and digest' );
+check( ! Spacefast_Sync_State::get()['settings_pending'], 'extracted sync acknowledges settings' );
+
+// A small queue double checks the adapter uses the worker lifecycle, not AJAX.
+eval( 'namespace Simply_Static {
+	class Archive_Creation_Job {
+		public $queue = 0;
+		public $processing = false;
+		public $paused = false;
+		public $canceled = false;
+		public $steps = 0;
+		public $dispatches = 0;
+		public $perform;
+		public function set_current_site_id($site_id) {}
+		public function set_options($options) {}
+		public function dispatch() { $this->dispatches++; return array(); }
+		public function is_queued() { return $this->queue > 0; }
+		public function is_processing() { return $this->processing; }
+		public function is_paused() { return $this->paused; }
+		public function is_cancelled() { return $this->canceled; }
+		public $pages = 0;
+		public $pages_per_task = 0;
+		public $tasks_per_handle = 1;
+		public function should_continue() {
+			$filter = $GLOBALS["spacefast_hooks"]["wp_archive_creation_job_should_continue"][0] ?? null;
+			return $filter ? $filter(true) : true;
+		}
+		protected function task($item) {
+			// Like Simply Static fetch_urls: ask should_continue before every page.
+			for ($page = 0; $page < $this->pages_per_task && $this->should_continue(); $page++) $this->pages++;
+			return false;
+		}
+		protected function handle() {
+			// Like Simply Static: run tasks, checking should_continue between them.
+			for ($run = 0; $run < $this->tasks_per_handle && $this->is_queued(); $run++) {
+				$this->steps++;
+				$this->queue--;
+				$this->task("fetch_urls");
+				if (is_callable($this->perform)) call_user_func($this->perform);
+				if (!$this->should_continue()) break;
+			}
+			if ($this->is_queued()) $this->dispatch();
+		}
+	}
+}' );
+$worker_filter = $GLOBALS['spacefast_hooks']['ss_archive_creation_job_class'][0];
+check( 'Custom_Worker' === $worker_filter( 'Custom_Worker' ), 'does not replace a custom exporter worker' );
+$worker_class = $worker_filter( '\\Simply_Static\\Archive_Creation_Job' );
+$job = new $worker_class();
+\Simply_Static\Plugin::$job = $job;
+$job->queue = 1;
+$job->processing = true;
+check( ! $job->run_step() && 0 === $job->steps, 'inline worker respects an existing worker lock' );
+$job->processing = false;
+$job->paused = true;
+$cli_error( static fn() => $job->run_step(), 'paused or canceled' );
+$job->paused = false;
+$job->canceled = true;
+$cli_error( static fn() => $job->run_step(), 'paused or canceled' );
+$job->canceled = false;
+$job->queue = 2;
+$job->pages_per_task = 3;
+$job->tasks_per_handle = 2;
+check( $job->run_step() && 3 === $job->pages && 1 === $job->steps && 1 === $job->queue, 'inline step lets a task process its pages, then yields before the next task' );
+$job->queue = 0;
+$job->pages = 0;
+$job->pages_per_task = 0;
+$job->tasks_per_handle = 1;
+$job->steps = 0;
+$job->dispatches = 0;
+
+Spacefast_Settings::merge( $static_connection );
+Spacefast_Sync_State::save( Spacefast_Sync_State::defaults() );
+\Simply_Static\Plugin::$start = static function () use ( $job ): bool {
+	call_user_func( $GLOBALS['spacefast_hooks']['ss_before_static_export'][0] );
+	$job->queue = 2;
+	$job->dispatch();
+	Spacefast_Plugin::static_export_started();
+	return true;
+};
+$job->perform = static function (): void { Spacefast_Plugin::static_publish_completed( 'ver_cli', 'live' ); };
+update_option( 'simply-static-use-single', 42 );
+update_option( 'simply-static-use-build', 42 );
+update_option( 'simply-static-404-only', true );
+$cli->publish( array(), array( 'wait' => true, 'timeout' => '5' ) );
+check( ! get_option( 'simply-static-use-single' ) && ! get_option( 'simply-static-use-build' ) && ! get_option( 'simply-static-404-only' ), 'CLI starts a full export despite previous partial scope' );
+check( 2 === $job->steps && 0 === $job->dispatches, 'publish wait drains tasks and cleanup inline without async dispatch' );
+check( 'ver_cli' === Spacefast_Sync_State::get()['last_version_id'], 'publish wait saves the live version' );
+check( ! Spacefast_CLI_Export_Job::$inline, 'publish restores ordinary background dispatch' );
+$cli->publish( array(), array() );
+check( 1 === $job->dispatches && 2 === $job->queue, 'publish without wait leaves background work queued' );
+
+Spacefast_Sync_State::save( Spacefast_Sync_State::defaults() );
+$job->perform = static function (): void { Spacefast_Plugin::static_publish_failed( 'Export failed in test' ); };
+$cli_error( static fn() => $cli->publish( array(), array( 'wait' => true ) ), 'Export failed in test' );
+check( ! Spacefast_CLI_Export_Job::$inline, 'failure restores ordinary background dispatch' );
+Spacefast_Sync_State::save( Spacefast_Sync_State::defaults() );
+$job->processing = true;
+$cli_error( static fn() => $cli->publish( array(), array( 'wait' => true, 'timeout' => '1' ) ), 'Timed out' );
+check( $job->is_queued() && ! Spacefast_CLI_Export_Job::$inline, 'timeout preserves queued work and restores dispatch' );
+$job->processing = false;
+
+$wait = new ReflectionMethod( Spacefast_CLI::class, 'wait' );
+Spacefast_Sync_State::save( array_merge( Spacefast_Sync_State::defaults(), array( 'desired' => 1, 'delivered' => 1, 'last_status' => 'ready', 'last_version_id' => 'ver_ready' ) ) );
+$GLOBALS['spacefast_remote_handler'] = static fn(): array => response( 200, array( 'status' => 'ready', 'isCurrentProduction' => false ) );
+$cli_error( static fn() => $wait->invoke( $cli, 1, microtime( true ) + 0.01 ), 'Timed out' );
+$GLOBALS['spacefast_remote_handler'] = static fn(): array => response( 200, array( 'status' => 'ready', 'isCurrentProduction' => true ) );
+$wait->invoke( $cli, 1, microtime( true ) + 1 );
+check( 'live' === Spacefast_Sync_State::get()['last_status'], 'ready version waits for production activation' );
+
+$revoked = false;
+$GLOBALS['spacefast_remote_handler'] = static function ( string $url ) use ( &$revoked ): array {
+	$revoked = str_ends_with( $url, '/oauth2/revoke' );
+	return response( 200 );
+};
+$cli->disconnect( array(), array( 'yes' => true ) );
+check( array( 'yes' => true ) === WP_CLI::$confirmation, 'disconnect forwards confirmation options' );
+check( $revoked && ! Spacefast_Settings::authorized(), 'disconnect revokes refresh access and clears credentials' );
+check( false === wp_next_scheduled( Spacefast_Sync_State::HOOK ), 'disconnect clears scheduled work' );
+$cli->status( array(), array( 'format' => 'json' ) );
+check( 'disconnected' === json_decode( end( WP_CLI::$lines ), true )['connection'], 'disconnected status remains valid JSON' );
 
 fwrite( STDOUT, "Spacefast WordPress behavior tests: PASS\n" );

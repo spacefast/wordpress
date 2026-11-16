@@ -348,10 +348,14 @@ final class Spacefast_Plugin {
 
 	public static function disconnect(): void {
 		self::assert_admin( 'spacefast_wordpress_disconnect' );
-		( new Spacefast_OAuth() )->revoke();
-		Spacefast_Settings::disconnect();
+		self::do_disconnect();
 		self::notice( 'success', __( 'Spacefast disconnected and its refresh access was revoked.', 'spacefast-wordpress' ) );
 		self::redirect();
+	}
+
+	public static function do_disconnect(): void {
+		( new Spacefast_OAuth() )->revoke();
+		Spacefast_Settings::disconnect();
 	}
 
 	public static function test_connection(): void {
@@ -370,30 +374,54 @@ final class Spacefast_Plugin {
 
 	public static function manual_build(): void {
 		self::assert_admin( 'spacefast_wordpress_build' );
+		$result = self::do_manual_build();
+		if ( ! $result['ok'] ) self::notice( 'error', $result['message'] );
+		self::redirect();
+	}
+
+	/** @return array{ok:bool,message:string,generation?:int} */
+	public static function do_manual_build(): array {
 		if ( Spacefast_Settings::MODE_HEADLESS !== Spacefast_Settings::mode() ) {
-			self::notice( 'error', __( 'Switch to Headless CMS to trigger repository builds.', 'spacefast-wordpress' ) );
-			self::redirect();
+			return array( 'ok' => false, 'message' => __( 'Switch to Headless CMS to trigger repository builds.', 'spacefast-wordpress' ) );
+		}
+		if ( ! Spacefast_Settings::selected() ) {
+			return array( 'ok' => false, 'message' => __( 'Connect Spacefast and choose a Space first.', 'spacefast-wordpress' ) );
 		}
 		self::record_change( 'manual', true );
+		$generation = (int) Spacefast_Sync_State::get()['desired'];
 		wp_clear_scheduled_hook( Spacefast_Sync_State::HOOK );
 		self::deliver();
-		self::redirect();
+		$state = Spacefast_Sync_State::get();
+		return array(
+			'ok' => ! in_array( $state['last_status'], array( 'blocked', 'retrying' ), true ),
+			'message' => (string) $state['last_message'] ?: __( 'Build requested.', 'spacefast-wordpress' ),
+			'generation' => $generation,
+		);
 	}
 
 	public static function manual_static_publish(): void {
 		self::assert_admin( 'spacefast_wordpress_publish' );
+		$result = self::do_manual_static_publish();
+		self::notice( $result['ok'] ? 'success' : 'error', $result['message'] );
+		self::redirect();
+	}
+
+	/** @return array{ok:bool,message:string,generation?:int} */
+	public static function do_manual_static_publish(): array {
 		if ( Spacefast_Settings::MODE_STATIC !== Spacefast_Settings::mode() ) {
-			self::notice( 'error', __( 'Switch to Static WordPress to publish an export.', 'spacefast-wordpress' ) );
-			self::redirect();
+			return array( 'ok' => false, 'message' => __( 'Switch to Static WordPress to publish an export.', 'spacefast-wordpress' ) );
+		}
+		if ( ! Spacefast_Settings::selected() ) {
+			return array( 'ok' => false, 'message' => __( 'Connect Spacefast and choose a Space first.', 'spacefast-wordpress' ) );
 		}
 		if ( ! self::simply_static_available() ) {
-			self::notice( 'error', __( 'Install and activate Simply Static before publishing.', 'spacefast-wordpress' ) );
-			self::redirect();
+			return array( 'ok' => false, 'message' => __( 'Install and activate Simply Static before publishing.', 'spacefast-wordpress' ) );
 		}
 		$before = Spacefast_Sync_State::get();
 		$was_active = self::static_delivery_active( $before );
 		$previous_attempt = (int) $before['last_attempt_at'];
 		self::record_change( 'manual', true );
+		$generation = (int) Spacefast_Sync_State::get()['desired'];
 		wp_clear_scheduled_hook( Spacefast_Sync_State::HOOK );
 		self::deliver();
 		$state = Spacefast_Sync_State::get();
@@ -405,11 +433,7 @@ final class Spacefast_Plugin {
 				? __( 'A publish is already running. Your latest changes will publish next.', 'spacefast-wordpress' )
 				: ( (string) $state['last_message'] ?: __( 'The publish could not start. The current live version is safe.', 'spacefast-wordpress' ) )
 			);
-		self::notice(
-			$active ? 'success' : 'error',
-			$message
-		);
-		self::redirect();
+		return array( 'ok' => $active, 'message' => $message, 'generation' => $generation );
 	}
 
 	public static function save_settings(): void {
@@ -435,8 +459,7 @@ final class Spacefast_Plugin {
 
 	public static function manual_settings_sync(): void {
 		self::assert_admin( 'spacefast_wordpress_sync_settings' );
-		self::mark_settings_pending();
-		$result = self::sync_space_settings();
+		$result = self::do_manual_settings_sync();
 		self::notice(
 			$result['ok'] ? 'success' : 'error',
 			$result['ok']
@@ -444,6 +467,12 @@ final class Spacefast_Plugin {
 				: $result['message']
 		);
 		self::redirect();
+	}
+
+	/** @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>} */
+	public static function do_manual_settings_sync(): array {
+		self::mark_settings_pending();
+		return self::sync_space_settings();
 	}
 
 	public static function wordpress_setting_changed(): void {
@@ -617,7 +646,7 @@ final class Spacefast_Plugin {
 
 	private static function record_change( string $reason, bool $force = false ): void {
 		if (
-			self::$change_recorded
+			( self::$change_recorded && ! $force )
 			|| ! Spacefast_Settings::selected()
 			|| ( ! $force && empty( Spacefast_Settings::get()['automatic_sync'] ) )
 		) {

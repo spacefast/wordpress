@@ -18,3 +18,9 @@ docker compose --project-name "${project_name}" --file "${compose_file}" run --r
   wp plugin activate spacefast-wordpress
 docker compose --project-name "${project_name}" --file "${compose_file}" run --rm wpcli \
   wp eval-file wp-content/plugins/spacefast-wordpress/tests/acceptance/wordpress.php
+docker compose --project-name "${project_name}" --file "${compose_file}" run --rm wpcli \
+  wp config set DISABLE_WP_CRON true --raw
+docker compose --project-name "${project_name}" --file "${compose_file}" run --rm wpcli \
+  wp plugin install simply-static --version=3.8.0 --activate
+docker compose --project-name "${project_name}" --file "${compose_file}" run --rm wpcli \
+  wp eval-file wp-content/plugins/spacefast-wordpress/tests/acceptance/wordpress.php cli
