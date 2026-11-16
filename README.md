@@ -47,6 +47,44 @@ Simply Static remains responsible for crawling WordPress and rewriting URLs.
 Spacefast never reads drafts, WordPress credentials, or the database. Dynamic
 WordPress features still need a static-compatible replacement.
 
+### Review, publish, and roll back
+
+Enable **Review before going live** under **Settings → Spacefast → WordPress
+sync** to stage exports. The default is off: existing sites continue publishing
+directly to live. When enabled, manual, automatic, and partial exports all wait
+for approval. Partial exports remain additive and preserve omitted files.
+
+After an export completes, the **Staged version** card shows added, changed, and
+removed file counts. **Open preview** opens that version in a new tab. **Copy
+preview link** creates a link for a reviewer; it grants access to that version
+for 10 minutes. Generate a fresh link after it expires. **Go live** promotes the
+reviewed version. **Discard** permanently deletes that staged version, leaving
+the live site alone. A later export replaces the staged card; earlier ready
+versions remain in history.
+
+**Versions** lists the latest 20 versions with their time, file count, live
+status, and manual/automatic source for exports recorded by this installation.
+Older or externally published versions show an unknown source. Use **Make live**
+to roll back to an earlier ready version. Promotion uses Spacefast's default
+rewrite refresh and records the returned version ID, including when rollback
+creates a new version from the old files. If Spacefast asks for a person to
+approve a promotion, a **Waiting for approval** card links to the approval in
+Spacefast; after approving, choose **Finish** to resend the same request. The
+continuation token stays on the server and is never shown. API failures leave
+the staged receipt available for retry. A full staged export after a deletion must go live before
+partial publishing resumes.
+
+Editors (`edit_others_posts`) can stage and preview when review is enabled on a
+connected static site. Administrators (`manage_options`) can promote, roll back,
+and discard. The `spacefast_wordpress_can_promote` filter receives the default
+capability result and can restrict or delegate those version actions; it does
+not grant access to connection settings.
+
+Existing static connections must **Reconnect Spacefast** once for previews and
+promotion. New connections request `publish:write`: Spacefast's scope mapping
+includes `versions:promote` and `versions:download` (required by preview sessions).
+The old `spaces:publish` scope grants only publishing. Headless scopes are unchanged.
+
 ## Headless CMS
 
 Open **Use WordPress as a CMS for a repository site** when an Astro or other repository project reads the

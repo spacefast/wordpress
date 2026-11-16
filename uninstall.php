@@ -11,4 +11,5 @@ delete_option( 'spacefast_wordpress_oauth_pending' );
 delete_option( 'spacefast_wordpress_oauth_choices' );
 delete_option( 'spacefast_wordpress_space_creation' );
 delete_option( 'spacefast_wordpress_snapshot_required' );
+delete_option( 'spacefast_wordpress_pending_approval' );
 delete_transient( 'spacefast_wordpress_admin_notice' );

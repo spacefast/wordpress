@@ -3,7 +3,7 @@ Contributors: spacefast
 Tags: static site, headless cms, simply static, deployment
 Requires at least: 6.5
 Requires PHP: 8.1
-Stable tag: 0.5.8
+Stable tag: 0.6.0
 License: GPLv2 or later
 
 Publish a Simply Static export to Spacefast, or rebuild a headless site when WordPress content changes.
@@ -29,7 +29,25 @@ Both modes include a manual action in Settings > Spacefast. Headless repository 
 
 OAuth access is limited to the Team you authorize and the mode you choose. WordPress syncs only the selected Space and waits for a real first publish or build before showing the connection as complete. Tokens are stored in non-autoloaded options and are never displayed.
 
+== Review before going live ==
+
+In Settings > Spacefast > WordPress sync, enable Review before going live to stage manual and automatic exports. It is off by default. Partial exports stay additive and preserve omitted files.
+
+The Staged version card shows file changes. Open preview opens the staged version in a new tab; Copy preview link creates a link that grants access for 10 minutes. Share it with your reviewer, then choose Go live to promote the version, or Discard to permanently delete it. The live site stays in place until promotion succeeds.
+
+Versions shows the last 20 versions, their time, source, file count, and live status. Make live restores an earlier ready version using Spacefast's default rewrite refresh. Sources are recorded locally; versions from before this update or other publishers show Unknown.
+
+Editors can stage and preview when review is enabled. Administrators can promote, roll back, and discard; developers can customize those permissions with the spacefast_wordpress_can_promote filter. Reconnect existing static installations once to grant publish:write for promotion and preview sessions.
+
 == Changelog ==
+
+= 0.6.0 =
+* Stage static exports for review with expiring preview links, then promote or discard from WordPress.
+* Browse the latest 20 versions and restore an earlier version with Make live.
+* Let editors stage while administrators control promotion, with a promotion capability filter.
+* Request publish:write for static preview and promotion; existing connections show a reconnect notice.
+* When Spacefast requires a person to approve a promotion or rollback, link to the approval and finish the same request afterward.
+* Keep sync state written by earlier versions working after upgrade.
 
 = 0.5.8 =
 * Retry transient upload and upload-refresh failures in place, with exponential backoff for about four minutes, instead of restarting the whole export as a new version.

@@ -7,7 +7,7 @@ final class Spacefast_Sync_State {
 	const HOOK = 'spacefast_wordpress_deliver';
 
 	/**
-	 * @return array{desired:int,delivered:int,event_id:string,reasons:array<int,string>,attempts:int,next_at:int,last_status:string,last_message:string,last_build_id:string,last_version_id:string,last_change_at:int,last_attempt_at:int,last_success_at:int,last_settings_sync_at:int,active_generation:int,settings_pending:bool}
+	 * @return array{desired:int,delivered:int,event_id:string,reasons:array<int,string>,attempts:int,next_at:int,last_status:string,last_message:string,last_build_id:string,last_version_id:string,staged_version_id:string,staged_publish_mode:string,active_review:?bool,active_source:string,pending_source:string,version_sources:array<string,string>,last_change_at:int,last_attempt_at:int,last_success_at:int,last_settings_sync_at:int,active_generation:int,settings_pending:bool}
 	 */
 	public static function defaults(): array {
 		return array(
@@ -21,6 +21,12 @@ final class Spacefast_Sync_State {
 			'last_message' => '',
 			'last_build_id' => '',
 			'last_version_id' => '',
+			'staged_version_id' => '',
+			'staged_publish_mode' => '',
+			'active_review' => null,
+			'active_source' => 'manual',
+			'pending_source' => 'manual',
+			'version_sources' => array(),
 			'last_change_at' => 0,
 			'last_attempt_at' => 0,
 			'last_success_at' => 0,
@@ -31,7 +37,7 @@ final class Spacefast_Sync_State {
 	}
 
 	/**
-	 * @return array{desired:int,delivered:int,event_id:string,reasons:array<int,string>,attempts:int,next_at:int,last_status:string,last_message:string,last_build_id:string,last_version_id:string,last_change_at:int,last_attempt_at:int,last_success_at:int,last_settings_sync_at:int,active_generation:int,settings_pending:bool}
+	 * @return array{desired:int,delivered:int,event_id:string,reasons:array<int,string>,attempts:int,next_at:int,last_status:string,last_message:string,last_build_id:string,last_version_id:string,staged_version_id:string,staged_publish_mode:string,active_review:?bool,active_source:string,pending_source:string,version_sources:array<string,string>,last_change_at:int,last_attempt_at:int,last_success_at:int,last_settings_sync_at:int,active_generation:int,settings_pending:bool}
 	 */
 	public static function get(): array {
 		$value = get_option( self::OPTION, array() );
@@ -47,6 +53,7 @@ final class Spacefast_Sync_State {
 	public static function record_change( array $state, string $reason, string $event_id ): array {
 		$state = array_merge( self::defaults(), $state );
 		$state['desired'] = (int) $state['desired'] + 1;
+		if ( 'static_export' !== $reason ) $state['pending_source'] = 'manual' === $reason ? 'manual' : 'auto';
 		$state['event_id'] = $event_id;
 		$state['reasons'] = array_values(
 			array_unique(
@@ -125,6 +132,14 @@ final class Spacefast_Sync_State {
 		$state['last_status'] = (int) $state['desired'] > (int) $state['delivered'] ? 'pending' : $status;
 		$state['last_message'] = '';
 		$state['last_version_id'] = $version_id;
+		if ( 'staged' === $status ) {
+			$state['staged_version_id'] = $version_id;
+		}
+		if ( '' !== $version_id ) {
+			$state['version_sources'][ $version_id ] = $state['active_source'];
+			$state['version_sources'] = array_slice( $state['version_sources'], -20, null, true );
+		}
+		$state['active_review'] = null;
 		$state['last_success_at'] = time();
 		$state['active_generation'] = 0;
 		return $state;
@@ -148,14 +163,18 @@ final class Spacefast_Sync_State {
 	 */
 	public static function mutate( callable $transition ): array {
 		for ( $attempt = 0; $attempt < 10; $attempt++ ) {
-			$current = self::get();
+			// Compare against the row as stored, not the defaults-merged view:
+			// state saved by an earlier release lacks newer keys, and swapping
+			// against the merged array would never match that row.
+			$stored = get_option( self::OPTION, array() );
+			$current = array_merge( self::defaults(), is_array( $stored ) ? $stored : array() );
 			$next = $transition( $current );
 			// MySQL reports zero affected rows when the serialized value is
 			// unchanged. That is a successful no-op, not a CAS conflict.
 			if ( $next === $current ) {
 				return $current;
 			}
-			if ( self::compare_and_swap_option( self::OPTION, $current, $next ) ) {
+			if ( self::compare_and_swap_option( self::OPTION, $stored, $next ) ) {
 				return $next;
 			}
 		}

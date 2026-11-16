@@ -16,7 +16,7 @@ final class Spacefast_Client {
 	/**
 	 * @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>}
 	 */
-	private function request( string $method, string $path, ?array $body = null, array $headers = array() ): array {
+	private function request( string $method, string $path, ?array $body = null, array $headers = array(), int $timeout = 10 ): array {
 		$settings = Spacefast_Settings::get();
 		$access_token = ( new Spacefast_OAuth( $this->transport ) )->access_token();
 		if ( '' === $access_token ) {
@@ -30,7 +30,7 @@ final class Spacefast_Client {
 		}
 		$args = array(
 			'method' => $method,
-			'timeout' => 10,
+			'timeout' => $timeout,
 			'redirection' => 0,
 			'reject_unsafe_urls' => true,
 			'sslverify' => true,
@@ -69,6 +69,7 @@ final class Spacefast_Client {
 		if (
 			$status >= 200
 			&& $status < 300
+			&& ! ( 'DELETE' === $method && 204 === $status )
 			&& ( '' === $raw_body || JSON_ERROR_NONE !== json_last_error() || ! is_array( $decoded ) )
 		) {
 			return array(
@@ -110,6 +111,8 @@ final class Spacefast_Client {
 				? 'The Spacefast connection is no longer authorized.'
 				: (string) ( $decoded['detail'] ?? 'Spacefast rejected the request.' ),
 			'data' => array(),
+			// Error details carry follow-up steps such as an approval link.
+			'details' => isset( $decoded['details'] ) && is_array( $decoded['details'] ) ? $decoded['details'] : array(),
 		);
 	}
 
@@ -273,7 +276,10 @@ final class Spacefast_Client {
 	 * @param array<int,array{path:string,size:int,sha256:string,contentType:string}> $files Files.
 	 * @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>}
 	 */
-	public function create_static_version( array $files, string $event_id, string $publish_mode ): array {
+	public function create_static_version( array $files, string $event_id, string $publish_mode, ?string $channel = 'live' ): array {
+		if ( null !== $channel && 'live' !== $channel ) {
+			throw new InvalidArgumentException( 'Static publish channel is invalid.' );
+		}
 		$settings = Spacefast_Settings::get();
 		return $this->request(
 			'POST',
@@ -281,7 +287,7 @@ final class Spacefast_Client {
 			array(
 				'publishMode' => $publish_mode,
 				'files' => $files,
-				'finalize' => array( 'channel' => 'live' ),
+				'finalize' => array( 'channel' => $channel ),
 				'source' => array(
 					'kind' => 'api',
 					'client' => 'spacefast-wordpress/' . SPACEFAST_WORDPRESS_VERSION,
@@ -300,6 +306,38 @@ final class Spacefast_Client {
 	/**
 	 * @return array{ok:bool,retryable:bool,code:string,message:string,data:array<string,mixed>}
 	 */
+	public function list_versions( int $limit = 20 ): array {
+		$settings = Spacefast_Settings::get();
+		return $this->request( 'GET', '/v1/spaces/' . rawurlencode( $settings['space_id'] ) . '/versions?limit=' . max( 1, min( 20, $limit ) ) );
+	}
+
+	public function preview_session( string $version_id, string $landing_path = '/' ): array {
+		return $this->request( 'POST', $this->version_path( $version_id ) . '/preview-session', array( 'landingPath' => $landing_path ) );
+	}
+
+	/**
+	 * @param string $idempotency_key Reused when an approved promotion is resent.
+	 * @param string $continuation_token Token from an approved confirmation_required response.
+	 */
+	public function promote_version( string $version_id, string $idempotency_key = '', string $continuation_token = '' ): array {
+		$headers = array();
+		if ( '' !== $idempotency_key ) $headers['Idempotency-Key'] = $idempotency_key;
+		if ( '' !== $continuation_token ) $headers['X-Spacefast-Continuation-Token'] = $continuation_token;
+		// Leave refreshRewrites at the server default, including for rollback.
+		return $this->request( 'POST', $this->version_path( $version_id ) . '/promote', array( 'channel' => 'live' ), $headers, 120 );
+	}
+
+	public function delete_version( string $version_id ): array {
+		return $this->request( 'DELETE', $this->version_path( $version_id ) );
+	}
+
+	private function version_path( string $version_id ): string {
+		if ( ! preg_match( '/^ver_[A-Za-z0-9_-]+$/', $version_id ) ) {
+			throw new InvalidArgumentException( 'Version ID is invalid.' );
+		}
+		return '/v1/spaces/' . rawurlencode( Spacefast_Settings::get()['space_id'] ) . '/versions/' . rawurlencode( $version_id );
+	}
+
 	public function resume_static_upload( string $version_id ): array {
 		$settings = Spacefast_Settings::get();
 		return $this->request(

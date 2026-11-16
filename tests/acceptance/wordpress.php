@@ -38,7 +38,7 @@ spacefast_accept(
 	'Space change handler is not registered.'
 );
 spacefast_accept(
-	array( 'teams:read', 'spaces:read', 'spaces:write', 'spaces:publish', 'offline_access' ) === Spacefast_OAuth::scopes( Spacefast_Settings::MODE_STATIC ),
+	array( 'teams:read', 'spaces:read', 'spaces:write', 'publish:write', 'offline_access' ) === Spacefast_OAuth::scopes( Spacefast_Settings::MODE_STATIC ),
 	'Static mode requested unexpected OAuth scopes.'
 );
 spacefast_accept(
@@ -113,8 +113,61 @@ spacefast_accept(
 );
 
 $plugin = get_plugin_data( WP_PLUGIN_DIR . '/spacefast-wordpress/spacefast-wordpress.php', false, false );
-spacefast_accept( '0.5.8' === $plugin['Version'], 'Unexpected plugin version.' );
+spacefast_accept( '0.6.0' === $plugin['Version'], 'Unexpected plugin version.' );
 spacefast_accept( 'https://github.com/spacefast/wordpress' === $plugin['UpdateURI'], 'Update URI is missing.' );
+
+foreach ( array( 'go_live', 'rollback', 'discard', 'preview' ) as $action ) {
+	spacefast_accept( 10 === has_action( 'admin_post_spacefast_wordpress_' . $action, array( 'Spacefast_Plugin', $action ) ), 'Version action is not registered: ' . $action );
+}
+spacefast_accept( false === Spacefast_Settings::get()['review_before_live'], 'Review must default to off.' );
+Spacefast_Settings::merge( array( 'review_before_live' => true, 'scope' => 'teams:read spaces:read spaces:write publish:write offline_access' ) );
+Spacefast_Sync_State::save( array_merge( Spacefast_Sync_State::defaults(), array(
+	'staged_version_id' => 'ver_review',
+	'staged_publish_mode' => 'snapshot',
+	'last_status' => 'staged',
+	'version_sources' => array( 'ver_review' => 'manual', 'ver_live' => 'auto' ),
+) ) );
+$version_http = static function ( $preempt, array $args, string $url ) {
+	if ( ! str_contains( $url, '/versions' ) ) return $preempt;
+	return array( 'response' => array( 'code' => 200 ), 'body' => wp_json_encode( array( 'data' => array(
+		array( 'id' => 'ver_review', 'ref' => 'v3', 'status' => 'ready', 'createdAt' => '2026-11-16T12:00:00Z', 'fileCount' => 12, 'filesAddedCount' => 2, 'filesChangedCount' => 3, 'filesRemovedCount' => 1, 'isCurrentProduction' => false ),
+		array( 'id' => 'ver_live', 'ref' => 'v2', 'status' => 'ready', 'createdAt' => '2026-11-15T12:00:00Z', 'fileCount' => 11, 'isCurrentProduction' => true ),
+		array( 'id' => 'ver_old', 'ref' => 'v1', 'status' => 'ready', 'createdAt' => '2026-11-14T12:00:00Z', 'fileCount' => 10, 'isCurrentProduction' => false ),
+	) ) ), 'headers' => array() );
+};
+add_filter( 'pre_http_request', $version_http, 10, 3 );
+ob_start();
+Spacefast_Plugin::render_admin();
+$review_markup = (string) ob_get_clean();
+foreach ( array( 'Review before going live', 'Staged version', '2 files added, 3 changed, 1 removed.', 'Open preview', 'Copy preview link', 'Go live', 'Discard', 'Versions', 'Make live', 'Manual', 'Auto', 'Live' ) as $label ) {
+	spacefast_accept( str_contains( $review_markup, $label ), 'Review UI is missing: ' . $label );
+}
+spacefast_accept( str_contains( $review_markup, 'name="version_id" value="ver_old"' ), 'Rollback form omits the old version ID.' );
+spacefast_accept( str_contains( $review_markup, wp_create_nonce( 'spacefast_wordpress_go_live' ) ), 'Go-live form lacks its nonce.' );
+spacefast_accept( ! str_contains( $review_markup, 'acceptance-access' ), 'Review UI exposes an OAuth token.' );
+$editor_id = wp_insert_user( array( 'user_login' => 'review-editor', 'user_pass' => wp_generate_password(), 'role' => 'editor' ) );
+spacefast_accept( ! is_wp_error( $editor_id ), 'Could not create the review editor.' );
+wp_set_current_user( $editor_id );
+ob_start();
+Spacefast_Plugin::render_admin();
+$editor_markup = (string) ob_get_clean();
+spacefast_accept( str_contains( $editor_markup, 'Stage now' ) && str_contains( $editor_markup, 'Open preview' ), 'Editor cannot stage and review.' );
+foreach ( array( 'Go live', 'Make live', 'Discard', 'Save and sync', 'Change connection' ) as $label ) {
+	spacefast_accept( ! str_contains( $editor_markup, '>' . $label . '<' ), 'Editor sees an administrator action: ' . $label );
+}
+spacefast_accept( ! Spacefast_Plugin::can_promote(), 'Editor has promotion capability by default.' );
+wp_set_current_user( 1 );
+$deny_promote = static fn( bool $allowed ): bool => false;
+add_filter( 'spacefast_wordpress_can_promote', $deny_promote );
+spacefast_accept( ! Spacefast_Plugin::can_promote(), 'Promotion capability filter is ignored.' );
+remove_filter( 'spacefast_wordpress_can_promote', $deny_promote );
+Spacefast_Settings::merge( array( 'scope' => 'teams:read spaces:read spaces:write spaces:publish offline_access' ) );
+ob_start();
+Spacefast_Plugin::render_admin();
+$legacy_markup = (string) ob_get_clean();
+spacefast_accept( str_contains( $legacy_markup, 'Reconnect Spacefast to enable previews, promotion, and rollback.' ), 'Existing installs do not get a reconnect notice.' );
+spacefast_accept( ! str_contains( $legacy_markup, 'value="spacefast_wordpress_go_live"' ), 'Existing grant exposes an unusable promotion action.' );
+remove_filter( 'pre_http_request', $version_http, 10 );
 
 Spacefast_Settings::disconnect();
 fwrite( STDOUT, "Spacefast WordPress container acceptance: PASS\n" );

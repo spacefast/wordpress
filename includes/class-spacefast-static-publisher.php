@@ -22,7 +22,8 @@ final class Spacefast_Static_Publisher {
 	public static function step(
 		string $archive_dir,
 		?Spacefast_Client $client = null,
-		string $publish_mode = 'snapshot'
+		string $publish_mode = 'snapshot',
+		?string $channel = 'live'
 	): array {
 		if ( ! in_array( $publish_mode, array( 'additive', 'snapshot' ), true ) ) {
 			throw new InvalidArgumentException( 'Static publish mode is invalid.' );
@@ -55,7 +56,7 @@ final class Spacefast_Static_Publisher {
 		) {
 			$manifest = self::manifest( $root );
 			$event_id = (string) wp_generate_uuid4();
-			$result = $client->create_static_version( $manifest, $event_id, $publish_mode );
+			$result = $client->create_static_version( $manifest, $event_id, $publish_mode, $channel );
 			if ( ! $result['ok'] ) {
 				throw new RuntimeException( $result['message'] );
 			}
@@ -80,6 +81,7 @@ final class Spacefast_Static_Publisher {
 			$state = array(
 				'archive_dir' => $root,
 				'publish_mode' => $publish_mode,
+				'channel' => $channel,
 				'event_id' => $event_id,
 				'version_id' => $version_id,
 				'upload' => $upload,
@@ -347,7 +349,9 @@ final class Spacefast_Static_Publisher {
 				'version_id' => (string) $state['version_id'],
 				'uploaded' => (int) $state['uploaded'],
 				'total' => (int) $state['total'],
-				'status' => true === ( $result['data']['isCurrentProduction'] ?? false ) ? 'live' : 'ready',
+				'status' => true === ( $result['data']['isCurrentProduction'] ?? false )
+					? 'live'
+					: ( array_key_exists( 'channel', $state ) && null === $state['channel'] ? 'staged' : 'ready' ),
 			);
 		}
 		if ( in_array( $status, array( 'failed', 'canceled', 'expired' ), true ) ) {

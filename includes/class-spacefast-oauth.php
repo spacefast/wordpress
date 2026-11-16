@@ -17,8 +17,10 @@ final class Spacefast_OAuth {
 
 	/** @return array<int,string> */
 	public static function scopes( string $mode ): array {
+		// spaces:publish alone excludes versions:promote and versions:download.
+		// publish:write includes both, including preview-session access.
 		return Spacefast_Settings::MODE_STATIC === $mode
-			? array( 'teams:read', 'spaces:read', 'spaces:write', 'spaces:publish', 'offline_access' )
+			? array( 'teams:read', 'spaces:read', 'spaces:write', 'publish:write', 'offline_access' )
 			: array( 'teams:read', 'spaces:read', 'spaces:write', 'builds:trigger', 'offline_access' );
 	}
 

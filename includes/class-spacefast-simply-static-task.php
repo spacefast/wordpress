@@ -23,10 +23,12 @@ final class Spacefast_Simply_Static_Publish_Task extends \Simply_Static\Task {
 					__( 'Content was deleted. Run a full Export and publish so the old files are removed from Spacefast.', 'spacefast-wordpress' )
 				);
 			}
+			$review = Spacefast_Sync_State::get()['active_review'] ?? Spacefast_Settings::get()['review_before_live'];
 			$result = Spacefast_Static_Publisher::step(
 				$options->get_archive_dir(),
 				null,
-				$partial_export ? 'additive' : 'snapshot'
+				$partial_export ? 'additive' : 'snapshot',
+				$review ? null : 'live'
 			);
 			if ( ! $result['done'] ) {
 				Spacefast_Plugin::static_publish_progress( $result['status'] );
@@ -43,14 +45,14 @@ final class Spacefast_Simply_Static_Publish_Task extends \Simply_Static\Task {
 				return false;
 			}
 
-			Spacefast_Plugin::static_publish_completed( $result['version_id'], $result['status'] );
-			if ( ! $partial_export ) {
+			Spacefast_Plugin::static_publish_completed( $result['version_id'], $result['status'], $partial_export ? 'additive' : 'snapshot' );
+			if ( ! $partial_export && ( 'live' === $result['status'] || ( ! $review && 'unchanged' === $result['status'] ) ) ) {
 				delete_option( 'spacefast_wordpress_snapshot_required' );
 			}
 			$this->save_status_message(
 				'unchanged' === $result['status']
 					? __( 'Spacefast is already up to date', 'spacefast-wordpress' )
-					: __( 'Published to Spacefast', 'spacefast-wordpress' )
+					: ( 'staged' === $result['status'] ? __( 'Staged for review in Settings → Spacefast', 'spacefast-wordpress' ) : __( 'Published to Spacefast', 'spacefast-wordpress' ) )
 			);
 			return true;
 		} catch ( Throwable $error ) {
